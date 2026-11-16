@@ -140,23 +140,44 @@
 
       function normalizeClient(raw) {
         if (!raw || typeof raw !== 'object') return null;
-        const records = toArray(raw.records).map(r => ({
-          recordId: String(r.recordId || `${seasonForDate(r.date).id}|${r.date}|${r.activityId}`),
-          seasonId: String(r.seasonId || seasonForDate(r.date).id),
-          date: String(r.date || ''),
-          activityId: String(r.activityId || ''),
-          done: r.done === true,
-          xp: Number.isSafeInteger(Number(r.xp)) && Number(r.xp) >= 0 ? Number(r.xp) : 0,
-          version: Number.isInteger(Number(r.version)) && Number(r.version) >= 0 ? Number(r.version) : 1,
-          deleted: r.deleted === true,
-          ...(r.source ? {
-            source: r.source,
-            settled: r.settled !== false,
-            sourceCount: Number(r.sourceCount) || (r.done ? 1 : 0),
-            ...(r.source === 'HEALTH_SHEET' ? { sourceValue: r.sourceValue ?? null, collected: !!r.collected } : {}),
-            ...(r.settlesAt ? { settlesAt: r.settlesAt } : {})
-          } : {})
-        })).filter(r => /^\d{4}-\d{2}-\d{2}$/.test(r.date) && r.activityId);
+        const map = new Map();
+        for (const r of toArray(raw.records)) {
+          if (!r || !/^\d{4}-\d{2}-\d{2}$/.test(String(r.date || '')) || !r.activityId) continue;
+          const date = String(r.date);
+          const activityId = String(r.activityId);
+          const sId = seasonForDate(date).id;
+          const key = `${sId}|${date}|${activityId}`;
+          const done = r.done === true;
+          const xp = Number.isSafeInteger(Number(r.xp)) && Number(r.xp) >= 0 ? Number(r.xp) : 0;
+          const version = Number.isInteger(Number(r.version)) && Number(r.version) >= 0 ? Number(r.version) : 1;
+          const isReading = r.source === 'READING_SHEET' || activityId === 'reading';
+          const sourceCount = isReading
+            ? (done ? Math.max(1, Math.floor(Number(r.sourceCount) || 1)) : 0)
+            : (Number(r.sourceCount) || (done ? 1 : 0));
+
+          const item = {
+            recordId: key,
+            seasonId: sId,
+            date,
+            activityId,
+            done,
+            xp,
+            version,
+            deleted: r.deleted === true,
+            ...(r.source ? {
+              source: r.source,
+              settled: typeof r.settled === 'boolean' ? r.settled : true,
+              sourceCount,
+              ...(r.source === 'HEALTH_SHEET' ? { sourceValue: r.sourceValue ?? null, collected: !!r.collected } : {}),
+              ...(r.settlesAt ? { settlesAt: r.settlesAt } : {})
+            } : {})
+          };
+
+          const prev = map.get(key);
+          if (!prev || item.version >= prev.version) {
+            map.set(key, item);
+          }
+        }
 
         const growthFloors = toArray(raw.growthFloors).map(g => ({
           seasonId: String(g.seasonId || 'S001'),
@@ -173,7 +194,7 @@
         return {
           ...raw,
           ok: true,
-          records,
+          records: [...map.values()],
           growthFloors,
           adventuresBySeason,
           sync: raw.sync || {}
@@ -198,7 +219,6 @@
         };
       }
 
-      // 1. 페이지 시작 즉시 app.html + Firebase(/lifequest/client, /lifequest/meta) 병렬 프리패치
       let cachedClient = null;
       let cachedMeta = null;
       let lastBackgroundSyncAt = 0;
@@ -224,7 +244,6 @@
         })
         .catch(() => normalizeMeta(null));
 
-      // 2. 구글 앱스크립트 숨김 브리지 연결 (Tasks 양방향 연동 및 시트 백업용)
       let bridgeSource = null;
       let resolveBridgeReady = null;
       const pending = new Map();
@@ -287,7 +306,6 @@
         } catch (_) {}
       }
 
-      // 회복·절제 습관 체크 시 회복성장 대시보드(/growth/data.json)에도 즉시 반영
       async function syncRecoveryHabitToGrowthDashboard(activityId, records) {
         if (!['sobriety', 'gambling-free', 'moderation'].includes(activityId)) return;
         try {
@@ -310,7 +328,6 @@
         } catch (_) {}
       }
 
-      // 직업/외형/프로필 계산 헬퍼
       function buildCareerForSeason(seasonId, records, meta) {
         const sObj = allSeasonsUpToToday().find(s => s.id === seasonId) || seasonForDate(todayKst());
         const stats = meta.statsBySeason?.[seasonId]?.values || ZERO_STATS;
@@ -340,7 +357,6 @@
         };
       }
 
-      // 3. /api/game 및 /api/ai 클라우드 하이브리드 라우터
       window.__lifeQuestHybridCall = async (pathname, req) => {
         const started = Date.now();
         const today = todayKst();
@@ -354,16 +370,18 @@
         let client = cachedClient || (await prefetchClientPromise);
         let meta = cachedMeta || (await prefetchMetaPromise);
 
-        // 클라우드가 비어 있는 최초 1회 시트 브리지에서 초기화
         if (!client || !Array.isArray(client.records)) {
-          const sheetData = await bridgeCall({ action: 'syncAndRead' });
-          client = normalizeClient(sheetData) || { ok: true, records: [], growthFloors: [], adventuresBySeason: {}, sync: {} };
+          try {
+            const sheetData = await bridgeCall({ action: 'syncAndRead' });
+            client = normalizeClient(sheetData) || { ok: true, records: [], growthFloors: [], adventuresBySeason: {}, sync: {} };
+          } catch (_) {
+            client = { ok: true, records: [], growthFloors: [], adventuresBySeason: {}, sync: {} };
+          }
           cachedClient = client;
         }
 
         const action = req && req.action;
 
-        // [1] 기록 조회 (0.1초 클라우드 즉시 반환 + 백그라운드 Tasks 동기화)
         if (action === 'read') {
           if (Date.now() - lastBackgroundSyncAt > 20000) {
             lastBackgroundSyncAt = Date.now();
@@ -385,7 +403,6 @@
           };
         }
 
-        // [2] 활동 체크·해제 (0.1초 클라우드 선저장 + 백그라운드 Tasks & 시트 동기화)
         if (action === 'set') {
           const date = String(req.date || today);
           const activityId = String(req.activityId || '');
@@ -414,7 +431,6 @@
           await writeFb('client', client);
           syncRecoveryHabitToGrowthDashboard(activityId, client.records);
 
-          // 백그라운드에서 Google Tasks 양방향 반영 및 활동기록 시트 업데이트
           bridgeCall({ action: 'set', date, activityId, done, expectedVersion: newRec.version - 1 })
             .then(res => {
               if (res && res.adventures && cachedClient.sync) {
@@ -432,7 +448,6 @@
           };
         }
 
-        // [3] 능력치 조회 및 저장
         if (action === 'stats-read') {
           const alloc = meta.statsBySeason?.[activeSeason.id] || { values: { ...ZERO_STATS }, revision: 0 };
           const skillSpent = meta.skillsBySeason?.[activeSeason.id]?.state?.spentPoints || 0;
@@ -450,7 +465,6 @@
           return { ok: true, allocation: meta.statsBySeason[sId], skillSpent, adventureSyncPending: false, timing: { totalMs: Date.now() - started } };
         }
 
-        // [4] 스킬 조회 및 습득·합성
         if (action === 'skills-read') {
           const sId = req.season || activeSeason.id;
           const sObj = allSeasonsUpToToday().find(s => s.id === sId) || activeSeason;
@@ -509,7 +523,6 @@
           };
         }
 
-        // [5] 모험 조회
         if (action === 'adventures-read') {
           const sId = req.season || activeSeason.id;
           let adv = client.adventuresBySeason?.[sId];
@@ -520,7 +533,6 @@
           return { ok: true, adventures: adv, timing: { totalMs: Date.now() - started } };
         }
 
-        // [6] 시즌 리포트 및 아카이브 조회
         if (action === 'season-report-read') {
           const sId = req.seasonId || activeSeason.id;
           const seasons = allSeasonsUpToToday();
@@ -539,7 +551,6 @@
           return { ok: true, seasons, summaries, archivedStats, activities: [], timing: { totalMs: Date.now() - started } };
         }
 
-        // [7] 퀘스트 보상 조회 및 수령
         if (action === 'rewards-read') {
           return { ok: true, rewards: meta.rewards || [], timing: { totalMs: Date.now() - started } };
         }
@@ -568,7 +579,6 @@
           return { ok: true, reward, timing: { totalMs: Date.now() - started } };
         }
 
-        // [8] 프로필 및 전직 조회
         if (action === 'careers-read') {
           const sId = req.season || activeSeason.id;
           return { ...buildCareerForSeason(sId, client.records, meta), timing: { totalMs: Date.now() - started } };
@@ -621,11 +631,48 @@
         return { ok: true, timing: { totalMs: Date.now() - started } };
       };
 
+      // 깨진 이미지 없이 모험가 전신 일러스트와 배경을 그려주는 내장 SVG 데이터 URI
+      const ADVENTURER_SVG = 'data:image/svg+xml;utf8,' + encodeURIComponent(
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 220">' +
+        '<defs>' +
+        '<radialGradient id="aura" cx="50%" cy="42%" r="48%"><stop offset="0%" stop-color="#f3d58d" stop-opacity="0.45"/><stop offset="65%" stop-color="#58b9b4" stop-opacity="0.18"/><stop offset="100%" stop-color="#071a20" stop-opacity="0"/></radialGradient>' +
+        '<linearGradient id="cloak" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#2b676e"/><stop offset="100%" stop-color="#123138"/></linearGradient>' +
+        '<linearGradient id="gold" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#f6de9d"/><stop offset="100%" stop-color="#b88938"/></linearGradient>' +
+        '</defs>' +
+        '<circle cx="80" cy="96" r="72" fill="url(#aura)"/>' +
+        '<circle cx="80" cy="96" r="56" fill="none" stroke="#d4ad62" stroke-opacity="0.35" stroke-width="1.2" stroke-dasharray="4 4"/>' +
+        '<path d="M44 192 L58 88 L102 88 L116 192 Z" fill="url(#cloak)" stroke="#d4ad62" stroke-width="1.8"/>' +
+        '<path d="M54 92 Q80 112 106 92 L112 152 Q80 164 48 152 Z" fill="#1d464d" stroke="#d4ad62" stroke-width="1.4"/>' +
+        '<circle cx="80" cy="60" r="20" fill="#eed9b3" stroke="#b88938" stroke-width="2"/>' +
+        '<path d="M56 58 Q80 30 104 58 Q80 46 56 58 Z" fill="#17383f" stroke="#d4ad62" stroke-width="1.6"/>' +
+        '<rect x="66" y="122" width="28" height="32" rx="4" fill="#243c35" stroke="url(#gold)" stroke-width="2"/>' +
+        '<path d="M80 128 L80 148 M70 138 L90 138" stroke="#f6de9d" stroke-width="2"/>' +
+        '<line x1="118" y1="48" x2="118" y2="194" stroke="url(#gold)" stroke-width="3.2" stroke-linecap="round"/>' +
+        '<circle cx="118" cy="44" r="7" fill="#7ee8df" stroke="#f6de9d" stroke-width="2"/>' +
+        '</svg>'
+      );
+
+      const BANNER_SVG = 'data:image/svg+xml;utf8,' + encodeURIComponent(
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 260">' +
+        '<defs>' +
+        '<linearGradient id="sky" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#0f2e36"/><stop offset="55%" stop-color="#194249"/><stop offset="100%" stop-color="#07191f"/></linearGradient>' +
+        '<radialGradient id="moon" cx="24%" cy="32%" r="35%"><stop offset="0%" stop-color="#f4d894" stop-opacity="0.32"/><stop offset="100%" stop-color="#194249" stop-opacity="0"/></radialGradient>' +
+        '</defs>' +
+        '<rect width="640" height="260" fill="url(#sky)"/>' +
+        '<rect width="640" height="260" fill="url(#moon)"/>' +
+        '<path d="M0 210 Q140 160 280 205 T640 185 L640 260 L0 260 Z" fill="#0b2228" opacity="0.85"/>' +
+        '<path d="M0 230 Q200 190 410 225 T640 210 L640 260 L0 260 Z" fill="#06151a"/>' +
+        '</svg>'
+      );
+
       function injectBridgeIntoAppHtml(rawHtml) {
         const closeTag = '<' + '/script>';
         const shim =
           '<script>\n' +
           '(() => {\n' +
+          '  if ("serviceWorker" in navigator) {\n' +
+          '    try { navigator.serviceWorker.register = () => Promise.resolve(); } catch (_) {}\n' +
+          '  }\n' +
           '  const origFetch = window.fetch.bind(window);\n' +
           '  window.fetch = async (input, init = {}) => {\n' +
           '    const raw = typeof input === "string" ? input : (input && input.url ? input.url : "");\n' +
@@ -652,13 +699,18 @@
           '})();\n' +
           closeTag;
 
-        const swRe = new RegExp('if\\(\'serviceWorker\' in navigator\\)\\{[\\s\\S]*?\\}', 'g');
         const cfRe = new RegExp('<script>\\(function\\(\\)\\{function c\\(\\)[\\s\\S]*?<' + '/script>', 'gi');
 
+        // 중괄호를 건드리지 않고 안전하게 서비스워커 호출과 이미지 경로만 치환
         let cleaned = String(rawHtml || '')
-          .replace(swRe, '')
           .replace(cfRe, '')
-          .replace(/location\.reload\(\)/g, 'window.top.location.reload()');
+          .replace("navigator.serviceWorker.register('/sw.js'", "Promise.resolve('/sw.js'")
+          .replace(/location\.reload\(\)/g, 'window.top.location.reload()')
+          .replaceAll('adventurer-fullbody-v1.webp', ADVENTURER_SVG)
+          .replaceAll('profile-adventurer.webp', ADVENTURER_SVG)
+          .replaceAll('woodland-backdrop-v1.webp', BANNER_SVG)
+          .replaceAll('journal-banner.webp', BANNER_SVG)
+          .replaceAll('inventory-banner.webp', BANNER_SVG);
 
         if (/<head[^>]*>/i.test(cleaned)) {
           return cleaned.replace(/<head[^>]*>/i, (m) => m + shim);
