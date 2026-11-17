@@ -479,8 +479,12 @@
           const d = await r.json();
           if (!d || typeof d !== 'object') return cachedClient;
           const norm = normalizeClient(d);
-          cachedClient = norm;
-          return norm;
+          if (norm && norm.records.length) {
+            cachedClient = norm;
+            saveLocalClientCache(norm);
+            return norm;
+          }
+          return cachedClient;
         } catch (_) {
           return cachedClient;
         }
@@ -513,6 +517,47 @@
           throw err;
         }
         return true;
+      }
+
+      const LOCAL_CLIENT_CACHE_KEY = 'lifequest.client.v4';
+      const APP_SNAPSHOT_KEY = 'lifequest.mvp.v2-confirmed-v1';
+
+      function saveLocalClientCache(clientObj) {
+        if (!clientObj || !Array.isArray(clientObj.records) || !clientObj.records.length) return;
+        try {
+          localStorage.setItem(LOCAL_CLIENT_CACHE_KEY, JSON.stringify(clientObj));
+        } catch (_) {}
+        try {
+          const existing = JSON.parse(localStorage.getItem(APP_SNAPSHOT_KEY) || 'null');
+          localStorage.setItem(APP_SNAPSHOT_KEY, JSON.stringify({
+            schema: 1,
+            records: clientObj.records,
+            growthFloors: Array.isArray(clientObj.growthFloors) ? clientObj.growthFloors : (existing?.growthFloors || []),
+            lastRecordSync: clientObj.updatedAt || existing?.lastRecordSync || new Date().toISOString()
+          }));
+        } catch (_) {}
+      }
+
+      function loadLocalClientCache() {
+        try {
+          const raw = JSON.parse(localStorage.getItem(LOCAL_CLIENT_CACHE_KEY) || 'null');
+          const norm = normalizeClient(raw);
+          if (norm && norm.records.length) return norm;
+        } catch (_) {}
+        try {
+          const snap = JSON.parse(localStorage.getItem(APP_SNAPSHOT_KEY) || 'null');
+          if (snap && Array.isArray(snap.records) && snap.records.length) {
+            const norm = normalizeClient({
+              ok: true,
+              records: snap.records,
+              growthFloors: Array.isArray(snap.growthFloors) ? snap.growthFloors : [],
+              sync: { lastSuccess: snap.lastRecordSync || '' },
+              updatedAt: snap.lastRecordSync || new Date().toISOString()
+            });
+            if (norm && norm.records.length) return norm;
+          }
+        } catch (_) {}
+        return null;
       }
 
       const prefetchShellPromise = fetch('./app.html')
@@ -730,19 +775,35 @@
         let meta = cachedMeta || (await prefetchMetaPromise);
 
         if (!client || !Array.isArray(client.records) || !client.records.length) {
-          try {
-            const getRes = await fetch(GAS_URL + '?action=read', { cache: 'no-store' }).then(r => (r.ok ? r.json() : null)).catch(() => null);
-            if (getRes && getRes.ok && Array.isArray(getRes.records)) {
-              client = normalizeClient(getRes);
-              cachedClient = client;
-            } else {
-              const sheetData = await bridgeCall({ action: 'syncAndRead' });
-              if (sheetData && sheetData.ok && Array.isArray(sheetData.records)) {
-                client = normalizeClient(sheetData);
-                cachedClient = client;
+          const localCached = loadLocalClientCache();
+          if (localCached && localCached.records.length) {
+            client = localCached;
+            cachedClient = client;
+            // Firebase /lifequest/client가 비어 있을 때(GAS UrlFetch 할당량 소진 등) 브라우저가 즉시 Firebase에 복구 업로드
+            writeFb('client', client).catch(() => {});
+          } else {
+            try {
+              const getRes = await fetch(GAS_URL + '?action=read', { cache: 'no-store' }).then(r => (r.ok ? r.json() : null)).catch(() => null);
+              if (getRes && getRes.ok && Array.isArray(getRes.records) && getRes.records.length) {
+                client = normalizeClient(getRes);
+              } else {
+                const fastSheetData = await bridgeCall({ action: 'read' }).catch(() => null);
+                if (fastSheetData && fastSheetData.ok && Array.isArray(fastSheetData.records) && fastSheetData.records.length) {
+                  client = normalizeClient(fastSheetData);
+                } else {
+                  const sheetData = await bridgeCall({ action: 'syncAndRead' });
+                  if (sheetData && sheetData.ok && Array.isArray(sheetData.records)) {
+                    client = normalizeClient(sheetData);
+                  }
+                }
               }
-            }
-          } catch (_) {}
+              if (client && Array.isArray(client.records) && client.records.length) {
+                cachedClient = client;
+                saveLocalClientCache(client);
+                writeFb('client', client).catch(() => {});
+              }
+            } catch (_) {}
+          }
           if (!client || !Array.isArray(client.records)) {
             client = normalizeClient({ ok: true, records: [], growthFloors: [], adventuresBySeason: {}, sync: {} });
           }
@@ -764,9 +825,8 @@
                   const norm = normalizeClient(fresh);
                   const afterSig = clientRecordSignature(norm);
                   cachedClient = norm;
-                  if (!fresh.firebaseUploaded) {
-                    try { await writeFb('client', norm); } catch (_) {}
-                  }
+                  saveLocalClientCache(norm);
+                  try { await writeFb('client', norm); } catch (_) {}
                   if (afterSig !== beforeSig && Date.now() - lastManualSetAt > 8000) {
                     try {
                       appFrame.contentWindow.document.getElementById('refreshCloud')?.click();
@@ -838,10 +898,9 @@
             client.sync.adventure = res.adventures;
           }
           cachedClient = normalizeClient(client);
+          saveLocalClientCache(cachedClient);
 
-          if (!res.firebaseUploaded) {
-            try { await writeFb('client', cachedClient); } catch (_) {}
-          }
+          try { await writeFb('client', cachedClient); } catch (_) {}
           void syncRecoveryHabitToGrowthDashboard(activityId, cachedClient.records);
 
           return {
@@ -1138,6 +1197,17 @@
           '  if ("serviceWorker" in navigator) {\n' +
           '    try { navigator.serviceWorker.register = () => Promise.resolve(); } catch (_) {}\n' +
           '  }\n' +
+          '  try {\n' +
+          '    const safeState = (state, title, url) => {\n' +
+          '      try {\n' +
+          '        const s = String(url || "");\n' +
+          '        if (s.startsWith("#")) window.top.history.replaceState(state, title, window.top.location.pathname + window.top.location.search + s);\n' +
+          '        else window.top.history.replaceState(state, title, window.top.location.pathname + window.top.location.search);\n' +
+          '      } catch (_) {}\n' +
+          '    };\n' +
+          '    window.history.replaceState = safeState;\n' +
+          '    window.history.pushState = safeState;\n' +
+          '  } catch (_) {}\n' +
           '  const origFetch = window.fetch.bind(window);\n' +
           '  window.fetch = async (input, init = {}) => {\n' +
           '    const raw = typeof input === "string" ? input : (input && input.url ? input.url : "");\n' +
@@ -1170,6 +1240,7 @@
           .replace(cfRe, '')
           .replace("navigator.serviceWorker.register('/sw.js'", "Promise.resolve('/sw.js'")
           .replace(/location\.reload\(\)/g, 'window.top.location.reload()')
+          .replace(/history\.replaceState\([^)]*\)/g, 'void 0')
           .replaceAll('adventurer-fullbody-v1.webp', ADVENTURER_SVG)
           .replaceAll('profile-adventurer.webp', ADVENTURER_SVG)
           .replaceAll('woodland-backdrop-v1.webp', BANNER_SVG)
@@ -1191,7 +1262,12 @@
           } catch (_) {}
         }
         if (text && text.includes('LIFE QUEST')) {
-          await Promise.all([prefetchClientPromise, prefetchMetaPromise]);
+          const warm = loadLocalClientCache();
+          if (warm) saveLocalClientCache(warm);
+          await Promise.race([
+            Promise.all([prefetchClientPromise, prefetchMetaPromise]),
+            new Promise(r => setTimeout(r, 200))
+          ]);
           appFrame.onload = () => bootOverlay.classList.add('hidden');
           appFrame.srcdoc = injectBridgeIntoAppHtml(text);
           setTimeout(() => bootOverlay.classList.add('hidden'), 150);
