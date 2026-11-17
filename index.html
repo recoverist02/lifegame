@@ -67,7 +67,7 @@
   <div id="bootOverlay">
     <div class="boot-compass">✦</div>
     <div class="boot-title">LIFE QUEST</div>
-    <div class="boot-sub" id="bootStatus">클라우드에서 모험 기록을 초고속으로 불러오는 중…</div>
+    <div class="boot-sub" id="bootStatus">클라우드에서 모험 기록을 불러오는 중…</div>
   </div>
 
   <iframe id="appFrame" title="Life Quest · 오늘의 기록"></iframe>
@@ -83,6 +83,12 @@
       const bootStatus = document.getElementById('bootStatus');
       const cleanFbUrl = FIREBASE_DB_URL.replace(/\/+$/, '');
 
+      // 과거 브라우저 강제 복원 캐시 정리 (일회성 마이그레이션)
+      try {
+        localStorage.removeItem('lifequest-manual-overrides-v1');
+        localStorage.removeItem('lifequest-synced-auto-v1');
+      } catch (_) {}
+
       function toArray(val) {
         if (!val) return [];
         if (Array.isArray(val)) return val.filter(v => v != null);
@@ -93,7 +99,7 @@
       }
 
       function todayKst() {
-        return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Seoul', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+        return new Date(Date.now() + 9 * 3600000).toISOString().slice(0, 10);
       }
 
       function shiftDateKey(key, days) {
@@ -136,91 +142,151 @@
       }
 
       const ACTIVITIES_CATALOG = [
-        { id: 'steps', name: '1만 보 걷기', area: '건강', xp: 6 },
-        { id: 'protein', name: '단백질 위주 식단', area: '건강', xp: 4 },
-        { id: 'supplements', name: '영양제', area: '건강', xp: 4 },
-        { id: 'strength', name: '근력 운동', area: '건강', xp: 20 },
-        { id: 'sleep', name: '수면 7시간 이상', area: '건강', xp: 12 },
-        { id: 'cardio', name: '유산소 운동', area: '건강', xp: 22 },
-        { id: 'english', name: '영어대화 5분', area: '학습', xp: 8 },
-        { id: 'blog', name: '블로그 글쓰기', area: '학습', xp: 60 },
-        { id: 'reading', name: '독서 1권', area: '학습', xp: 80 },
-        { id: 'budget', name: '가계부 쓰기', area: '재정', xp: 18 },
-        { id: 'repayment', name: '변제금 납부', area: '재정', xp: 200 },
-        { id: 'smalltalk', name: '스몰톡하기', area: '관계', xp: 6 },
-        { id: 'eyecontact', name: '아이컨택', area: '관계', xp: 6 },
-        { id: 'bedtime', name: '24시 취침', area: '규율', xp: 6 },
-        { id: 'sobriety', name: '금주하기', area: '규율', xp: 8 },
-        { id: 'gambling-free', name: '단도박 유지', area: '규율', xp: 8 },
-        { id: 'moderation', name: '절제하기', area: '규율', xp: 8 },
-        { id: 'meditation', name: '5분 명상하기', area: '성찰', xp: 6 },
-        { id: 'journal', name: '일기쓰기', area: '성찰', xp: 18 },
-        { id: 'ga', name: 'GA 참석', area: '성찰', xp: 25 },
-        { id: 'shuffle', name: '셔플댄스 연습', area: '도전', xp: 60 },
-        { id: 'hiking', name: '등산', area: '도전', xp: 250 },
-        { id: 'marathon', name: '마라톤', area: '도전', xp: 300 }
+        { id: 'steps', name: '1만 보 걷기', area: '건강', xp: 6, criterion: '전날 1만 보 이상 (다음 날 11:10 수집 · 낮 12시 정산)' },
+        { id: 'protein', name: '단백질 위주 식단', area: '건강', xp: 4, criterion: '하루 단백질 목표 섭취 달성' },
+        { id: 'supplements', name: '영양제', area: '건강', xp: 4, criterion: '일일 영양제 복용 완료' },
+        { id: 'strength', name: '근력 운동', area: '건강', xp: 20, criterion: '운동기록 시트 근력 운동 등록 (다음 날 낮 12시 정산)' },
+        { id: 'sleep', name: '수면 7시간 이상', area: '건강', xp: 12, criterion: '전날 총 수면 420분 이상 (다음 날 11:10 수집 · 낮 12시 정산)' },
+        { id: 'cardio', name: '유산소 운동', area: '건강', xp: 22, criterion: '운동기록 시트 유산소 운동 등록 (다음 날 낮 12시 정산)' },
+        { id: 'english', name: '영어대화 5분', area: '학습', xp: 8, criterion: '영어 스피킹 연습 5분 이상' },
+        { id: 'blog', name: '블로그 글쓰기', area: '학습', xp: 60, criterion: '블로그 포스팅 작성 완료' },
+        { id: 'reading', name: '독서 1권', area: '학습', xp: 80, criterion: '독서관리 완독 기록 (1권당 80 XP · 다음 날 낮 12시 정산)' },
+        { id: 'budget', name: '가계부 쓰기', area: '재정', xp: 18, criterion: '일일 가계부 정리 완료' },
+        { id: 'repayment', name: '변제금 납부', area: '재정', xp: 200, criterion: '월별 변제금 납부 완료' },
+        { id: 'smalltalk', name: '스몰톡하기', area: '관계', xp: 6, criterion: '동료·주변인과 먼저 가벼운 대화 나누기' },
+        { id: 'eyecontact', name: '아이컨택', area: '관계', xp: 6, criterion: '대화할 때 눈 맞추며 경청하기' },
+        { id: 'bedtime', name: '24시 취침', area: '규율', xp: 6, criterion: '자정(24:00) 이전 취침 (다음 날 11:10 수집 · 낮 12시 정산)' },
+        { id: 'sobriety', name: '금주하기', area: '규율', xp: 8, criterion: '오늘 하루 금주 유지' },
+        { id: 'gambling-free', name: '단도박 유지', area: '규율', xp: 8, criterion: '오늘 하루 단도박 유지' },
+        { id: 'moderation', name: '절제하기', area: '규율', xp: 8, criterion: '충동적 소비·습관 절제 유지' },
+        { id: 'meditation', name: '5분 명상하기', area: '성찰', xp: 6, criterion: '5분 호흡·명상 완료' },
+        { id: 'journal', name: '일기쓰기', area: '성찰', xp: 18, criterion: '일기기록 시트 작성 완료 (하루 1회 · 다음 날 낮 12시 정산)' },
+        { id: 'ga', name: 'GA 참석', area: '성찰', xp: 25, criterion: 'GA 출석부 출석 등록 (다음 날 낮 12시 정산)' },
+        { id: 'shuffle', name: '셔플댄스 연습', area: '도전', xp: 60, criterion: '셔플댄스 연습 세션 완료' },
+        { id: 'hiking', name: '등산', area: '도전', xp: 250, criterion: '등산 코스 완주' },
+        { id: 'marathon', name: '마라톤', area: '도전', xp: 300, criterion: '마라톤 대회 완주' }
       ];
 
       const ACTIVITIES_XP = Object.fromEntries(ACTIVITIES_CATALOG.map(a => [a.id, a.xp]));
       const ZERO_STATS = { vitality: 0, agility: 0, intelligence: 0, willpower: 0, charisma: 0 };
-      const OVERRIDE_STORAGE_KEY = 'lifequest-manual-overrides-v1';
-      const AUTO_CACHE_STORAGE_KEY = 'lifequest-synced-auto-v1';
-      const APP_SNAPSHOT_KEY = 'lifequest.mvp.v2-confirmed-v1';
+      const STAT_KEYS = ['vitality', 'agility', 'intelligence', 'willpower', 'charisma'];
       let lastManualSetAt = 0;
 
-      function loadManualOverrides() {
-        try {
-          const raw = JSON.parse(localStorage.getItem(OVERRIDE_STORAGE_KEY) || '{}');
-          return raw && typeof raw === 'object' ? raw : {};
-        } catch (_) {
-          return {};
+      // 스킬 카탈로그 및 검증 규칙 (app.html과 100% 동일한 서버 권한 검증용)
+      const SKILL_VERSION = 1;
+      const SKILL_COSTS = { intro: 2, firstBranch: 4, secondBranch: 6, legend: 10, ultimate: 15 };
+      const SKILL_TREES = [
+        { id: 'combat', name: '전투', stat: 'vitality', statName: '체력', icon: '⚔' },
+        { id: 'magic', name: '마법', stat: 'intelligence', statName: '지능', icon: '✦' },
+        { id: 'alchemy', name: '연금술', stat: 'charisma', statName: '매력', icon: '⚗' },
+        { id: 'guardian', name: '수호', stat: 'willpower', statName: '의지', icon: '🛡' },
+        { id: 'explore', name: '탐험', stat: 'agility', statName: '민첩', icon: '🧭' }
+      ];
+      const SKILL_CATALOG = [
+        { id: 'combat-intro', tree: 'combat', kind: 'intro', name: '일단 주먹부터', description: '검술 교본을 펼치기 전에 주먹을 쥐었다. 책은 무사하다.', action: '몸으로 부딪쳐 길을 살핀다' },
+        { id: 'combat-a', tree: 'combat', kind: 'branch', name: '정면돌파', description: '문이 잠겼다면 문틀과 협상한다. 대체로 문틀이 양보한다.', action: '장애물의 정면을 돌파한다', lead: '돌격하는', object: '돌주먹', ending: '문틀철거' },
+        { id: 'combat-b', tree: 'combat', kind: 'branch', name: '광전사의 야근', description: '체력이 먼저 퇴근을 신청했지만 의욕이 반려했다.', action: '끝까지 밀어붙이며 기회를 만든다', lead: '퇴근 못 한', object: '야근전사', ending: '무한추진' },
+        { id: 'magic-intro', tree: 'magic', kind: 'intro', name: '수상한 주문 입문', description: '발음은 틀렸지만 무언가 반응했다. 강사도 처음 본 현상이다.', action: '작은 주문으로 상황을 살핀다' },
+        { id: 'magic-a', tree: 'magic', kind: 'branch', name: '폭발도 답이다', description: '문제의 크기를 줄이는 대신 문제 주변을 넓혔다.', action: '폭발 마법으로 돌파구를 노린다', lead: '폭발하는', object: '마력폭탄', ending: '대폭발' },
+        { id: 'magic-b', tree: 'magic', kind: 'branch', name: '현실 오류 수정', description: '불가능을 오타로 접수한다. 세계 관리자에게는 비밀이다.', action: '공간의 빈틈과 규칙의 허점을 찾는다', lead: '규칙을 고치는', object: '오류술사', ending: '현실수정' },
+        { id: 'alchemy-intro', tree: 'alchemy', kind: 'intro', name: '약장수의 첫걸음', description: '성분 설명보다 눈빛이 자신 있다. 일단 시음은 본인이 한다.', action: '주변 재료의 쓸모를 찾아본다' },
+        { id: 'alchemy-a', tree: 'alchemy', kind: 'branch', name: '기적의 혼합물', description: '같이 넣으면 안 된다는 재료끼리 의외로 사이가 좋았다.', action: '손에 잡히는 재료를 섞어 해결책을 만든다', lead: '기적을 섞는', object: '만능물약', ending: '황금배합' },
+        { id: 'alchemy-b', tree: 'alchemy', kind: 'branch', name: '수상한 거래술', description: '위기를 기회로, 기회를 정기구독으로 바꾸는 화술.', action: '협상과 교환으로 상황을 풀어본다', lead: '계약하는', object: '약장수', ending: '수상한계약' },
+        { id: 'guardian-intro', tree: 'guardian', kind: 'intro', name: '버티면 내 차례', description: '아직 쓰러지지 않았다는 사실로 상대의 계획을 수정시킨다.', action: '자리를 지키며 상황을 살핀다' },
+        { id: 'guardian-a', tree: 'guardian', kind: 'branch', name: '철벽 민원실', description: '공격은 접수한다. 통과는 승인하지 않는다.', action: '방패를 세워 위협을 막아낸다', lead: '흔들리지 않는', object: '철벽방패', ending: '철벽결재' },
+        { id: 'guardian-b', tree: 'guardian', kind: 'branch', name: '대신 맞는 품격', description: '멋있게 앞을 막아섰다. 치료비 영수증도 품위 있게 챙겼다.', action: '일행 앞에 서서 위험을 대신 감당한다', lead: '모두를 지키는', object: '호위기사', ending: '절대호위' },
+        { id: 'explore-intro', tree: 'explore', kind: 'intro', name: '일단 나가보자', description: '지도는 없지만 신발은 신었다. 출발 요건은 충족했다.', action: '주변을 돌아다니며 단서를 살핀다' },
+        { id: 'explore-a', tree: 'explore', kind: 'branch', name: '샛길 전문가', description: '정문이 막혔다는 소식에 뒷문도 아니고 옆 지붕을 본다.', action: '남들이 놓친 샛길을 찾아 움직인다', lead: '샛길을 여는', object: '길잡이', ending: '차원우회' },
+        { id: 'explore-b', tree: 'explore', kind: 'branch', name: '유물은 내 운명', description: '남들은 잡동사니라 부른다. 감정서는 아직 작성 중이다.', action: '흔적과 수상한 물건에서 실마리를 찾는다', lead: '유물을 깨우는', object: '유물사냥꾼', ending: '보물각성' }
+      ];
+
+      function skillById(id) {
+        return SKILL_CATALOG.find(s => s.id === id);
+      }
+
+      function skillLegend(ids) {
+        if (!Array.isArray(ids) || ids.length !== 3 || new Set(ids).size !== 3 || ids.some(id => skillById(id)?.kind !== 'branch')) {
+          throw new Error('INVALID_SKILL');
         }
+        const skills = SKILL_CATALOG.filter(s => ids.includes(s.id));
+        const [a, b, c] = skills;
+        return {
+          id: 'legend:' + skills.map(s => s.id).join('+'),
+          kind: 'legend',
+          name: `${a.lead} ${b.object}의 ${c.ending}`,
+          description: `「${a.name}」·「${b.name}」·「${c.name}」의 합성 비전. ${a.action}. ${b.action}. ${c.action}. 왕립 특허청은 분류를 포기했다.`,
+          ingredients: skills.map(s => s.id),
+          trees: [...new Set(skills.map(s => s.tree))]
+        };
       }
 
-      function saveManualOverride(rec) {
-        try {
-          const map = loadManualOverrides();
-          map[`${rec.date}|${rec.activityId}`] = { ...rec, savedAt: Date.now() };
-          localStorage.setItem(OVERRIDE_STORAGE_KEY, JSON.stringify(map));
-        } catch (_) {}
-      }
-
-      function loadSyncedAutoCache() {
-        try {
-          const raw = JSON.parse(localStorage.getItem(AUTO_CACHE_STORAGE_KEY) || '{}');
-          return raw && typeof raw === 'object' ? Object.values(raw) : [];
-        } catch (_) {
-          return [];
+      function skillUltimate(legends) {
+        if (!Array.isArray(legends) || legends.length !== 3 || new Set(legends.flatMap(l => l.ingredients)).size !== 9) {
+          throw new Error('INVALID_SKILL');
         }
+        const a = skillById(legends[0].ingredients[0]);
+        const b = skillById(legends[1].ingredients[1]);
+        const c = skillById(legends[2].ingredients[2]);
+        return {
+          id: 'ultimate:' + legends.map(l => l.id).join('>'),
+          kind: 'ultimate',
+          name: `궁극: ${a.lead} ${b.object}의 ${c.ending}`,
+          description: `핵심 「${legends[0].name}」 → 발현 「${legends[1].name}」 → 완성 「${legends[2].name}」. 세 전설이 하나로 이어졌다. 왕국 재난보험에 새 항목이 생겼다.`,
+          ingredients: legends.map(l => l.id),
+          trees: SKILL_TREES.map(t => t.id)
+        };
       }
 
-      function saveSyncedAutoCache(records) {
-        try {
-          const AUTO_IDS = new Set(['steps', 'sleep', 'bedtime', 'strength', 'cardio', 'ga', 'reading', 'journal']);
-          const raw = JSON.parse(localStorage.getItem(AUTO_CACHE_STORAGE_KEY) || '{}');
-          const map = raw && typeof raw === 'object' ? raw : {};
-          for (const r of toArray(records)) {
-            if (!r || !r.activityId || !AUTO_IDS.has(String(r.activityId))) continue;
-            const date = normalizeDateStr(r.date, r.recordId);
-            if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) continue;
-            if (r.done === true) {
-              map[`${date}|${r.activityId}`] = { ...r, date };
-            }
+      function skillRequirement(state, id, level, stats) {
+        const s = skillById(id);
+        if (!s) return { allowed: false, reason: '알 수 없는 스킬' };
+        if (state.learned.some(x => x.id === id)) return { allowed: false, owned: true, reason: '습득 완료' };
+        const tree = SKILL_TREES.find(t => t.id === s.tree);
+        const count = state.learned.filter(x => skillById(x.id)?.tree === s.tree && skillById(x.id)?.kind === 'branch').length;
+        const minLevel = s.kind === 'intro' ? 1 : count ? 20 : 10;
+        const minStat = s.kind === 'intro' ? 3 : count ? 16 : 8;
+        const intro = state.learned.some(x => x.id === tree.id + '-intro');
+        const cost = s.kind === 'intro' ? SKILL_COSTS.intro : count ? SKILL_COSTS.secondBranch : SKILL_COSTS.firstBranch;
+        return {
+          cost,
+          allowed: level >= minLevel && (stats[tree.stat] || 0) >= minStat && (s.kind === 'intro' || intro),
+          minLevel,
+          minStat,
+          stat: tree.stat,
+          statName: tree.statName
+        };
+      }
+
+      function skillTransition(current, req, { level, stats, at }) {
+        const state = JSON.parse(JSON.stringify(current || { schema: SKILL_VERSION, learned: [], legends: [], ultimate: null, spentPoints: 0 }));
+        let cost = 0;
+        if (req.action === 'skills-learn') {
+          if (state.learned.some(s => s.id === req.skillId)) return { state, unchanged: true, cost: 0 };
+          const rule = skillRequirement(state, req.skillId, level, stats);
+          if (!rule.allowed) throw new Error(skillById(req.skillId) ? 'SKILL_LOCKED' : 'INVALID_SKILL');
+          cost = rule.cost;
+          state.learned.push({ id: req.skillId, at, level, stats: { ...stats } });
+        } else if (req.action === 'skills-fuse') {
+          const legend = skillLegend(toArray(req.ingredients));
+          if (state.legends.some(l => l.id === legend.id)) return { state, unchanged: true, cost: 0 };
+          const used = new Set(state.legends.flatMap(l => l.ingredients));
+          const gate = [30, 45, 60][state.legends.length];
+          if (!gate || level < gate || legend.ingredients.some(id => used.has(id) || !state.learned.some(s => s.id === id))) {
+            throw new Error('SKILL_LOCKED');
           }
-          localStorage.setItem(AUTO_CACHE_STORAGE_KEY, JSON.stringify(map));
-        } catch (_) {}
-      }
-
-      function loadAppConfirmedSnapshot() {
-        try {
-          const snap = JSON.parse(localStorage.getItem(APP_SNAPSHOT_KEY) || 'null');
-          return snap && Array.isArray(snap.records) ? snap.records : [];
-        } catch (_) {
-          return [];
+          cost = SKILL_COSTS.legend;
+          state.legends.push({ ...legend, at, level, order: state.legends.length + 1 });
+        } else if (req.action === 'skills-ultimate') {
+          if (state.ultimate) return { state, unchanged: true, cost: 0 };
+          if (level < 80 || state.legends.length !== 3) throw new Error('SKILL_LOCKED');
+          cost = SKILL_COSTS.ultimate;
+          state.ultimate = { ...skillUltimate(state.legends), at, level };
+        } else {
+          throw new Error('INVALID_SKILL');
         }
+        state.spentPoints = (Number(current?.spentPoints) || 0) + cost;
+        return { state, unchanged: false, cost };
       }
-
-      const INITIAL_SHEET_SEED = {"ok":true,"version":6,"records":[{"recordId":"TEST|2026-10-16|steps","seasonId":"TEST","date":"2026-10-16","activityId":"steps","done":true,"xp":6,"version":5,"deleted":false,"source":"HEALTH_SHEET","settled":true,"sourceCount":1,"sourceValue":null,"collected":true,"settlesAt":"2026-10-17T12:00:00+09:00"},{"recordId":"TEST|2026-10-16|supplements","seasonId":"TEST","date":"2026-10-16","activityId":"supplements","done":true,"xp":4,"version":3,"deleted":false},{"recordId":"TEST|2026-10-16|strength","seasonId":"TEST","date":"2026-10-16","activityId":"strength","done":true,"xp":20,"version":1,"deleted":false,"source":"WORKOUT_SHEET","settled":true,"sourceCount":1,"settlesAt":"2026-10-17T12:00:00+09:00"},{"recordId":"TEST|2026-10-16|reading","seasonId":"TEST","date":"2026-10-16","activityId":"reading","done":true,"xp":80,"version":1,"deleted":false,"source":"READING_SHEET","settled":true,"sourceCount":1,"settlesAt":"2026-10-17T12:00:00+09:00"},{"recordId":"TEST|2026-10-16|blog","seasonId":"TEST","date":"2026-10-16","activityId":"blog","done":true,"xp":60,"version":1,"deleted":false},{"recordId":"TEST|2026-10-16|marathon","seasonId":"TEST","date":"2026-10-16","activityId":"marathon","done":true,"xp":300,"version":1,"deleted":false},{"recordId":"TEST|2026-10-19|steps","seasonId":"TEST","date":"2026-10-19","activityId":"steps","done":true,"xp":6,"version":1,"deleted":false,"source":"HEALTH_SHEET","settled":true,"sourceCount":1,"sourceValue":null,"collected":true,"settlesAt":"2026-10-20T12:00:00+09:00"},{"recordId":"TEST|2026-10-19|supplements","seasonId":"TEST","date":"2026-10-19","activityId":"supplements","done":true,"xp":4,"version":11,"deleted":false},{"recordId":"TEST|2026-10-19|blog","seasonId":"TEST","date":"2026-10-19","activityId":"blog","done":true,"xp":60,"version":1,"deleted":false},{"recordId":"TEST|2026-10-19|strength","seasonId":"TEST","date":"2026-10-19","activityId":"strength","done":true,"xp":20,"version":1,"deleted":false,"source":"WORKOUT_SHEET","settled":true,"sourceCount":1,"settlesAt":"2026-10-20T12:00:00+09:00"},{"recordId":"TEST|2026-10-19|ga","seasonId":"TEST","date":"2026-10-19","activityId":"ga","done":true,"xp":25,"version":1,"deleted":false,"source":"GA_SHEET","settled":true,"sourceCount":1,"settlesAt":"2026-10-20T12:00:00+09:00"},{"recordId":"TEST|2026-10-19|journal","seasonId":"TEST","date":"2026-10-19","activityId":"journal","done":true,"xp":18,"version":1,"deleted":false,"source":"JOURNAL_SHEET","settled":true,"sourceCount":1,"settlesAt":"2026-10-20T12:00:00+09:00"},{"recordId":"TEST|2026-10-19|cardio","seasonId":"TEST","date":"2026-10-19","activityId":"cardio","done":true,"xp":22,"version":1,"deleted":false,"source":"WORKOUT_SHEET","settled":true,"sourceCount":1,"settlesAt":"2026-10-20T12:00:00+09:00"},{"recordId":"TEST|2026-10-20|supplements","seasonId":"TEST","date":"2026-10-20","activityId":"supplements","done":true,"xp":4,"version":9,"deleted":false},{"recordId":"TEST|2026-10-20|smalltalk","seasonId":"TEST","date":"2026-10-20","activityId":"smalltalk","done":true,"xp":6,"version":1,"deleted":false},{"recordId":"TEST|2026-10-20|bedtime","seasonId":"TEST","date":"2026-10-20","activityId":"bedtime","done":true,"xp":6,"version":3,"deleted":false,"source":"HEALTH_SHEET","settled":true,"sourceCount":1,"sourceValue":null,"collected":true,"settlesAt":"2026-10-21T12:00:00+09:00"},{"recordId":"TEST|2026-10-20|sobriety","seasonId":"TEST","date":"2026-10-20","activityId":"sobriety","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"TEST|2026-10-20|gambling-free","seasonId":"TEST","date":"2026-10-20","activityId":"gambling-free","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"TEST|2026-10-20|meditation","seasonId":"TEST","date":"2026-10-20","activityId":"meditation","done":true,"xp":6,"version":1,"deleted":false},{"recordId":"TEST|2026-10-20|strength","seasonId":"TEST","date":"2026-10-20","activityId":"strength","done":true,"xp":20,"version":2,"deleted":false,"source":"WORKOUT_SHEET","settled":true,"sourceCount":1,"settlesAt":"2026-10-21T12:00:00+09:00"},{"recordId":"TEST|2026-10-20|eyecontact","seasonId":"TEST","date":"2026-10-20","activityId":"eyecontact","done":true,"xp":6,"version":1,"deleted":false},{"recordId":"TEST|2026-10-20|protein","seasonId":"TEST","date":"2026-10-20","activityId":"protein","done":true,"xp":4,"version":1,"deleted":false},{"recordId":"TEST|2026-10-20|cardio","seasonId":"TEST","date":"2026-10-20","activityId":"cardio","done":true,"xp":22,"version":2,"deleted":false,"source":"WORKOUT_SHEET","settled":true,"sourceCount":1,"settlesAt":"2026-10-21T12:00:00+09:00"},{"recordId":"TEST|2026-10-20|steps","seasonId":"TEST","date":"2026-10-20","activityId":"steps","done":true,"xp":6,"version":2,"deleted":false,"source":"HEALTH_SHEET","settled":true,"sourceCount":1,"sourceValue":null,"collected":true,"settlesAt":"2026-10-21T12:00:00+09:00"},{"recordId":"TEST|2026-10-20|sleep","seasonId":"TEST","date":"2026-10-20","activityId":"sleep","done":true,"xp":12,"version":2,"deleted":false,"source":"HEALTH_SHEET","settled":true,"sourceCount":1,"sourceValue":null,"collected":true,"settlesAt":"2026-10-21T12:00:00+09:00"},{"recordId":"TEST|2026-10-20|budget","seasonId":"TEST","date":"2026-10-20","activityId":"budget","done":true,"xp":18,"version":1,"deleted":false},{"recordId":"TEST|2026-10-21|protein","seasonId":"TEST","date":"2026-10-21","activityId":"protein","done":true,"xp":4,"version":1,"deleted":false},{"recordId":"TEST|2026-10-21|supplements","seasonId":"TEST","date":"2026-10-21","activityId":"supplements","done":true,"xp":4,"version":1,"deleted":false},{"recordId":"TEST|2026-10-21|sobriety","seasonId":"TEST","date":"2026-10-21","activityId":"sobriety","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"TEST|2026-10-21|gambling-free","seasonId":"TEST","date":"2026-10-21","activityId":"gambling-free","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"TEST|2026-10-21|ga","seasonId":"TEST","date":"2026-10-21","activityId":"ga","done":true,"xp":25,"version":2,"deleted":false,"source":"GA_SHEET","settled":true,"sourceCount":1,"settlesAt":"2026-10-22T12:00:00+09:00"},{"recordId":"TEST|2026-10-21|meditation","seasonId":"TEST","date":"2026-10-21","activityId":"meditation","done":true,"xp":6,"version":1,"deleted":false},{"recordId":"TEST|2026-10-21|smalltalk","seasonId":"TEST","date":"2026-10-21","activityId":"smalltalk","done":true,"xp":6,"version":1,"deleted":false},{"recordId":"TEST|2026-10-21|eyecontact","seasonId":"TEST","date":"2026-10-21","activityId":"eyecontact","done":true,"xp":6,"version":1,"deleted":false},{"recordId":"TEST|2026-10-21|budget","seasonId":"TEST","date":"2026-10-21","activityId":"budget","done":true,"xp":18,"version":1,"deleted":false},{"recordId":"TEST|2026-10-21|repayment","seasonId":"TEST","date":"2026-10-21","activityId":"repayment","done":true,"xp":200,"version":1,"deleted":false},{"recordId":"TEST|2026-10-22|sobriety","seasonId":"TEST","date":"2026-10-22","activityId":"sobriety","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"TEST|2026-10-22|gambling-free","seasonId":"TEST","date":"2026-10-22","activityId":"gambling-free","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"TEST|2026-10-21|steps","seasonId":"TEST","date":"2026-10-21","activityId":"steps","done":true,"xp":6,"version":2,"deleted":false,"source":"HEALTH_SHEET","settled":true,"sourceCount":1,"sourceValue":null,"collected":true,"settlesAt":"2026-10-22T12:00:00+09:00"},{"recordId":"TEST|2026-10-22|protein","seasonId":"TEST","date":"2026-10-22","activityId":"protein","done":true,"xp":4,"version":1,"deleted":false},{"recordId":"TEST|2026-10-22|supplements","seasonId":"TEST","date":"2026-10-22","activityId":"supplements","done":true,"xp":4,"version":1,"deleted":false},{"recordId":"TEST|2026-10-22|meditation","seasonId":"TEST","date":"2026-10-22","activityId":"meditation","done":true,"xp":6,"version":1,"deleted":false},{"recordId":"TEST|2026-10-22|smalltalk","seasonId":"TEST","date":"2026-10-22","activityId":"smalltalk","done":true,"xp":6,"version":1,"deleted":false},{"recordId":"TEST|2026-10-22|eyecontact","seasonId":"TEST","date":"2026-10-22","activityId":"eyecontact","done":true,"xp":6,"version":1,"deleted":false},{"recordId":"TEST|2026-10-22|budget","seasonId":"TEST","date":"2026-10-22","activityId":"budget","done":true,"xp":18,"version":1,"deleted":false},{"recordId":"TEST|2026-10-22|strength","seasonId":"TEST","date":"2026-10-22","activityId":"strength","done":true,"xp":20,"version":2,"deleted":false,"source":"WORKOUT_SHEET","settled":true,"sourceCount":1,"settlesAt":"2026-10-23T12:00:00+09:00"},{"recordId":"TEST|2026-10-23|english","seasonId":"TEST","date":"2026-10-23","activityId":"english","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"TEST|2026-10-23|gambling-free","seasonId":"TEST","date":"2026-10-23","activityId":"gambling-free","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"TEST|2026-10-23|sobriety","seasonId":"TEST","date":"2026-10-23","activityId":"sobriety","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"TEST|2026-10-23|journal","seasonId":"TEST","date":"2026-10-23","activityId":"journal","done":true,"xp":18,"version":1,"deleted":false,"source":"JOURNAL_SHEET","settled":true,"sourceCount":1,"settlesAt":"2026-10-24T12:00:00+09:00"},{"recordId":"TEST|2026-10-23|budget","seasonId":"TEST","date":"2026-10-23","activityId":"budget","done":true,"xp":18,"version":1,"deleted":false},{"recordId":"TEST|2026-10-22|steps","seasonId":"TEST","date":"2026-10-22","activityId":"steps","done":true,"xp":6,"version":2,"deleted":false,"source":"HEALTH_SHEET","settled":true,"sourceCount":1,"sourceValue":null,"collected":true,"settlesAt":"2026-10-23T12:00:00+09:00"},{"recordId":"TEST|2026-10-22|bedtime","seasonId":"TEST","date":"2026-10-22","activityId":"bedtime","done":true,"xp":6,"version":2,"deleted":false,"source":"HEALTH_SHEET","settled":true,"sourceCount":1,"sourceValue":null,"collected":true,"settlesAt":"2026-10-23T12:00:00+09:00"},{"recordId":"TEST|2026-10-23|strength","seasonId":"TEST","date":"2026-10-23","activityId":"strength","done":true,"xp":20,"version":2,"deleted":false,"source":"WORKOUT_SHEET","settled":true,"sourceCount":1,"settlesAt":"2026-10-24T12:00:00+09:00"},{"recordId":"TEST|2026-10-23|protein","seasonId":"TEST","date":"2026-10-23","activityId":"protein","done":true,"xp":4,"version":1,"deleted":false},{"recordId":"TEST|2026-10-23|supplements","seasonId":"TEST","date":"2026-10-23","activityId":"supplements","done":true,"xp":4,"version":1,"deleted":false},{"recordId":"TEST|2026-10-23|eyecontact","seasonId":"TEST","date":"2026-10-23","activityId":"eyecontact","done":true,"xp":6,"version":1,"deleted":false},{"recordId":"TEST|2026-10-23|smalltalk","seasonId":"TEST","date":"2026-10-23","activityId":"smalltalk","done":true,"xp":6,"version":1,"deleted":false},{"recordId":"TEST|2026-10-23|cardio","seasonId":"TEST","date":"2026-10-23","activityId":"cardio","done":true,"xp":22,"version":2,"deleted":false,"source":"WORKOUT_SHEET","settled":true,"sourceCount":1,"settlesAt":"2026-10-24T12:00:00+09:00"},{"recordId":"TEST|2026-10-24|meditation","seasonId":"TEST","date":"2026-10-24","activityId":"meditation","done":true,"xp":6,"version":1,"deleted":false},{"recordId":"TEST|2026-10-24|gambling-free","seasonId":"TEST","date":"2026-10-24","activityId":"gambling-free","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"TEST|2026-10-23|steps","seasonId":"TEST","date":"2026-10-23","activityId":"steps","done":true,"xp":6,"version":2,"deleted":false,"source":"HEALTH_SHEET","settled":true,"sourceCount":1,"sourceValue":null,"collected":true,"settlesAt":"2026-10-24T12:00:00+09:00"},{"recordId":"TEST|2026-10-24|sobriety","seasonId":"TEST","date":"2026-10-24","activityId":"sobriety","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"TEST|2026-10-24|protein","seasonId":"TEST","date":"2026-10-24","activityId":"protein","done":true,"xp":4,"version":1,"deleted":false},{"recordId":"TEST|2026-10-24|journal","seasonId":"TEST","date":"2026-10-24","activityId":"journal","done":true,"xp":18,"version":1,"deleted":false,"source":"JOURNAL_SHEET","settled":true,"sourceCount":1,"settlesAt":"2026-10-25T12:00:00+09:00"},{"recordId":"TEST|2026-10-24|ga","seasonId":"TEST","date":"2026-10-24","activityId":"ga","done":true,"xp":25,"version":2,"deleted":false,"source":"GA_SHEET","settled":true,"sourceCount":1,"settlesAt":"2026-10-25T12:00:00+09:00"},{"recordId":"TEST|2026-10-24|sleep","seasonId":"TEST","date":"2026-10-24","activityId":"sleep","done":true,"xp":12,"version":2,"deleted":false,"source":"HEALTH_SHEET","settled":true,"sourceCount":1,"sourceValue":null,"collected":true,"settlesAt":"2026-10-25T12:00:00+09:00"},{"recordId":"TEST|2026-10-24|bedtime","seasonId":"TEST","date":"2026-10-24","activityId":"bedtime","done":true,"xp":6,"version":2,"deleted":false,"source":"HEALTH_SHEET","settled":true,"sourceCount":1,"sourceValue":null,"collected":true,"settlesAt":"2026-10-25T12:00:00+09:00"},{"recordId":"TEST|2026-10-24|supplements","seasonId":"TEST","date":"2026-10-24","activityId":"supplements","done":true,"xp":4,"version":1,"deleted":false},{"recordId":"TEST|2026-10-24|moderation","seasonId":"TEST","date":"2026-10-24","activityId":"moderation","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"TEST|2026-10-24|eyecontact","seasonId":"TEST","date":"2026-10-24","activityId":"eyecontact","done":true,"xp":6,"version":1,"deleted":false},{"recordId":"TEST|2026-10-24|smalltalk","seasonId":"TEST","date":"2026-10-24","activityId":"smalltalk","done":true,"xp":6,"version":1,"deleted":false},{"recordId":"TEST|2026-10-24|budget","seasonId":"TEST","date":"2026-10-24","activityId":"budget","done":true,"xp":18,"version":1,"deleted":false},{"recordId":"TEST|2026-10-25|protein","seasonId":"TEST","date":"2026-10-25","activityId":"protein","done":true,"xp":4,"version":1,"deleted":false},{"recordId":"TEST|2026-10-25|sobriety","seasonId":"TEST","date":"2026-10-25","activityId":"sobriety","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"TEST|2026-10-25|gambling-free","seasonId":"TEST","date":"2026-10-25","activityId":"gambling-free","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"TEST|2026-10-25|eyecontact","seasonId":"TEST","date":"2026-10-25","activityId":"eyecontact","done":true,"xp":6,"version":1,"deleted":false},{"recordId":"TEST|2026-10-25|smalltalk","seasonId":"TEST","date":"2026-10-25","activityId":"smalltalk","done":true,"xp":6,"version":1,"deleted":false},{"recordId":"TEST|2026-10-25|cardio","seasonId":"TEST","date":"2026-10-25","activityId":"cardio","done":true,"xp":22,"version":2,"deleted":false,"source":"WORKOUT_SHEET","settled":true,"sourceCount":1,"settlesAt":"2026-10-26T12:00:00+09:00"},{"recordId":"TEST|2026-10-25|supplements","seasonId":"TEST","date":"2026-10-25","activityId":"supplements","done":true,"xp":4,"version":1,"deleted":false},{"recordId":"TEST|2026-10-25|moderation","seasonId":"TEST","date":"2026-10-25","activityId":"moderation","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"TEST|2026-10-25|meditation","seasonId":"TEST","date":"2026-10-25","activityId":"meditation","done":true,"xp":6,"version":1,"deleted":false},{"recordId":"TEST|2026-10-26|english","seasonId":"TEST","date":"2026-10-26","activityId":"english","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"TEST|2026-10-25|steps","seasonId":"TEST","date":"2026-10-25","activityId":"steps","done":true,"xp":6,"version":2,"deleted":false,"source":"HEALTH_SHEET","settled":true,"sourceCount":1,"sourceValue":null,"collected":true,"settlesAt":"2026-10-26T12:00:00+09:00"},{"recordId":"TEST|2026-10-25|bedtime","seasonId":"TEST","date":"2026-10-25","activityId":"bedtime","done":true,"xp":6,"version":2,"deleted":false,"source":"HEALTH_SHEET","settled":true,"sourceCount":1,"sourceValue":null,"collected":true,"settlesAt":"2026-10-26T12:00:00+09:00"},{"recordId":"TEST|2026-10-26|journal","seasonId":"TEST","date":"2026-10-26","activityId":"journal","done":true,"xp":18,"version":2,"deleted":false,"source":"JOURNAL_SHEET","settled":true,"sourceCount":1,"settlesAt":"2026-10-27T12:00:00+09:00"},{"recordId":"TEST|2026-10-26|supplements","seasonId":"TEST","date":"2026-10-26","activityId":"supplements","done":true,"xp":4,"version":1,"deleted":false},{"recordId":"TEST|2026-10-26|sobriety","seasonId":"TEST","date":"2026-10-26","activityId":"sobriety","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"TEST|2026-10-26|gambling-free","seasonId":"TEST","date":"2026-10-26","activityId":"gambling-free","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"TEST|2026-10-26|protein","seasonId":"TEST","date":"2026-10-26","activityId":"protein","done":true,"xp":4,"version":1,"deleted":false},{"recordId":"TEST|2026-10-26|smalltalk","seasonId":"TEST","date":"2026-10-26","activityId":"smalltalk","done":true,"xp":6,"version":1,"deleted":false},{"recordId":"TEST|2026-10-26|eyecontact","seasonId":"TEST","date":"2026-10-26","activityId":"eyecontact","done":true,"xp":6,"version":1,"deleted":false},{"recordId":"TEST|2026-10-26|moderation","seasonId":"TEST","date":"2026-10-26","activityId":"moderation","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"TEST|2026-10-26|strength","seasonId":"TEST","date":"2026-10-26","activityId":"strength","done":true,"xp":20,"version":2,"deleted":false,"source":"WORKOUT_SHEET","settled":true,"sourceCount":1,"settlesAt":"2026-10-27T12:00:00+09:00"},{"recordId":"TEST|2026-10-26|meditation","seasonId":"TEST","date":"2026-10-26","activityId":"meditation","done":true,"xp":6,"version":1,"deleted":false},{"recordId":"TEST|2026-10-26|budget","seasonId":"TEST","date":"2026-10-26","activityId":"budget","done":true,"xp":18,"version":1,"deleted":false},{"recordId":"TEST|2026-10-27|journal","seasonId":"TEST","date":"2026-10-27","activityId":"journal","done":true,"xp":18,"version":3,"deleted":false,"source":"JOURNAL_SHEET","settled":true,"sourceCount":1,"settlesAt":"2026-10-28T12:00:00+09:00"},{"recordId":"TEST|2026-10-27|protein","seasonId":"TEST","date":"2026-10-27","activityId":"protein","done":true,"xp":4,"version":1,"deleted":false},{"recordId":"TEST|2026-10-27|supplements","seasonId":"TEST","date":"2026-10-27","activityId":"supplements","done":true,"xp":4,"version":1,"deleted":false},{"recordId":"TEST|2026-10-27|sobriety","seasonId":"TEST","date":"2026-10-27","activityId":"sobriety","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"TEST|2026-10-27|gambling-free","seasonId":"TEST","date":"2026-10-27","activityId":"gambling-free","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"TEST|2026-10-27|moderation","seasonId":"TEST","date":"2026-10-27","activityId":"moderation","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"TEST|2026-10-27|meditation","seasonId":"TEST","date":"2026-10-27","activityId":"meditation","done":true,"xp":6,"version":1,"deleted":false},{"recordId":"TEST|2026-10-27|eyecontact","seasonId":"TEST","date":"2026-10-27","activityId":"eyecontact","done":true,"xp":6,"version":1,"deleted":false},{"recordId":"TEST|2026-10-27|smalltalk","seasonId":"TEST","date":"2026-10-27","activityId":"smalltalk","done":true,"xp":6,"version":1,"deleted":false},{"recordId":"TEST|2026-10-27|budget","seasonId":"TEST","date":"2026-10-27","activityId":"budget","done":true,"xp":18,"version":1,"deleted":false},{"recordId":"TEST|2026-10-26|steps","seasonId":"TEST","date":"2026-10-26","activityId":"steps","done":true,"xp":6,"version":2,"deleted":false,"source":"HEALTH_SHEET","settled":true,"sourceCount":1,"sourceValue":null,"collected":true,"settlesAt":"2026-10-27T12:00:00+09:00"},{"recordId":"TEST|2026-10-26|sleep","seasonId":"TEST","date":"2026-10-26","activityId":"sleep","done":true,"xp":12,"version":2,"deleted":false,"source":"HEALTH_SHEET","settled":true,"sourceCount":1,"sourceValue":null,"collected":true,"settlesAt":"2026-10-27T12:00:00+09:00"},{"recordId":"TEST|2026-10-26|bedtime","seasonId":"TEST","date":"2026-10-26","activityId":"bedtime","done":true,"xp":6,"version":2,"deleted":false,"source":"HEALTH_SHEET","settled":true,"sourceCount":1,"sourceValue":null,"collected":true,"settlesAt":"2026-10-27T12:00:00+09:00"},{"recordId":"TEST|2026-10-27|strength","seasonId":"TEST","date":"2026-10-27","activityId":"strength","done":true,"xp":20,"version":2,"deleted":false,"source":"WORKOUT_SHEET","settled":true,"sourceCount":1,"settlesAt":"2026-10-28T12:00:00+09:00"},{"recordId":"TEST|2026-10-28|gambling-free","seasonId":"TEST","date":"2026-10-28","activityId":"gambling-free","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"TEST|2026-10-28|protein","seasonId":"TEST","date":"2026-10-28","activityId":"protein","done":true,"xp":4,"version":1,"deleted":false},{"recordId":"TEST|2026-10-28|reading","seasonId":"TEST","date":"2026-10-28","activityId":"reading","done":true,"xp":80,"version":4,"deleted":false,"source":"READING_SHEET","settled":true,"sourceCount":1,"settlesAt":"2026-10-29T12:00:00+09:00"},{"recordId":"TEST|2026-10-27|steps","seasonId":"TEST","date":"2026-10-27","activityId":"steps","done":true,"xp":6,"version":2,"deleted":false,"source":"HEALTH_SHEET","settled":true,"sourceCount":1,"sourceValue":null,"collected":true,"settlesAt":"2026-10-28T12:00:00+09:00"},{"recordId":"TEST|2026-10-27|bedtime","seasonId":"TEST","date":"2026-10-27","activityId":"bedtime","done":true,"xp":6,"version":2,"deleted":false,"source":"HEALTH_SHEET","settled":true,"sourceCount":1,"sourceValue":null,"collected":true,"settlesAt":"2026-10-28T12:00:00+09:00"},{"recordId":"TEST|2026-10-28|journal","seasonId":"TEST","date":"2026-10-28","activityId":"journal","done":true,"xp":18,"version":3,"deleted":false,"source":"JOURNAL_SHEET","settled":true,"sourceCount":1,"settlesAt":"2026-10-29T12:00:00+09:00"},{"recordId":"TEST|2026-10-28|supplements","seasonId":"TEST","date":"2026-10-28","activityId":"supplements","done":true,"xp":4,"version":1,"deleted":false},{"recordId":"TEST|2026-10-28|moderation","seasonId":"TEST","date":"2026-10-28","activityId":"moderation","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"TEST|2026-10-28|smalltalk","seasonId":"TEST","date":"2026-10-28","activityId":"smalltalk","done":true,"xp":6,"version":1,"deleted":false},{"recordId":"TEST|2026-10-28|eyecontact","seasonId":"TEST","date":"2026-10-28","activityId":"eyecontact","done":true,"xp":6,"version":1,"deleted":false},{"recordId":"TEST|2026-10-28|budget","seasonId":"TEST","date":"2026-10-28","activityId":"budget","done":true,"xp":18,"version":1,"deleted":false},{"recordId":"TEST|2026-10-28|meditation","seasonId":"TEST","date":"2026-10-28","activityId":"meditation","done":true,"xp":6,"version":1,"deleted":false},{"recordId":"TEST|2026-10-28|ga","seasonId":"TEST","date":"2026-10-28","activityId":"ga","done":true,"xp":25,"version":2,"deleted":false,"source":"GA_SHEET","settled":true,"sourceCount":1,"settlesAt":"2026-10-29T12:00:00+09:00"},{"recordId":"TEST|2026-10-29|english","seasonId":"TEST","date":"2026-10-29","activityId":"english","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"TEST|2026-10-29|gambling-free","seasonId":"TEST","date":"2026-10-29","activityId":"gambling-free","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"TEST|2026-10-29|sobriety","seasonId":"TEST","date":"2026-10-29","activityId":"sobriety","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"TEST|2026-10-29|budget","seasonId":"TEST","date":"2026-10-29","activityId":"budget","done":true,"xp":18,"version":1,"deleted":false},{"recordId":"TEST|2026-10-29|journal","seasonId":"TEST","date":"2026-10-29","activityId":"journal","done":true,"xp":18,"version":3,"deleted":false,"source":"JOURNAL_SHEET","settled":true,"sourceCount":1,"settlesAt":"2026-10-30T12:00:00+09:00"},{"recordId":"TEST|2026-10-29|supplements","seasonId":"TEST","date":"2026-10-29","activityId":"supplements","done":true,"xp":4,"version":1,"deleted":false},{"recordId":"TEST|2026-10-29|meditation","seasonId":"TEST","date":"2026-10-29","activityId":"meditation","done":true,"xp":6,"version":1,"deleted":false},{"recordId":"TEST|2026-10-28|steps","seasonId":"TEST","date":"2026-10-28","activityId":"steps","done":true,"xp":6,"version":1,"deleted":false,"source":"HEALTH_SHEET","settled":true,"sourceCount":1,"sourceValue":null,"collected":true,"settlesAt":"2026-10-29T12:00:00+09:00"},{"recordId":"TEST|2026-10-29|protein","seasonId":"TEST","date":"2026-10-29","activityId":"protein","done":true,"xp":4,"version":1,"deleted":false},{"recordId":"TEST|2026-10-29|moderation","seasonId":"TEST","date":"2026-10-29","activityId":"moderation","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"TEST|2026-10-29|eyecontact","seasonId":"TEST","date":"2026-10-29","activityId":"eyecontact","done":true,"xp":6,"version":1,"deleted":false},{"recordId":"TEST|2026-10-29|smalltalk","seasonId":"TEST","date":"2026-10-29","activityId":"smalltalk","done":true,"xp":6,"version":1,"deleted":false},{"recordId":"TEST|2026-10-29|strength","seasonId":"TEST","date":"2026-10-29","activityId":"strength","done":true,"xp":20,"version":2,"deleted":false,"source":"WORKOUT_SHEET","settled":true,"sourceCount":1,"settlesAt":"2026-10-30T12:00:00+09:00"},{"recordId":"TEST|2026-10-30|english","seasonId":"TEST","date":"2026-10-30","activityId":"english","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"TEST|2026-10-30|sobriety","seasonId":"TEST","date":"2026-10-30","activityId":"sobriety","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"TEST|2026-10-30|gambling-free","seasonId":"TEST","date":"2026-10-30","activityId":"gambling-free","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"TEST|2026-10-30|moderation","seasonId":"TEST","date":"2026-10-30","activityId":"moderation","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"TEST|2026-10-30|journal","seasonId":"TEST","date":"2026-10-30","activityId":"journal","done":true,"xp":18,"version":3,"deleted":false,"source":"JOURNAL_SHEET","settled":true,"sourceCount":1,"settlesAt":"2026-10-31T12:00:00+09:00"},{"recordId":"TEST|2026-10-29|steps","seasonId":"TEST","date":"2026-10-29","activityId":"steps","done":true,"xp":6,"version":2,"deleted":false,"source":"HEALTH_SHEET","settled":true,"sourceCount":1,"sourceValue":null,"collected":true,"settlesAt":"2026-10-30T12:00:00+09:00"},{"recordId":"TEST|2026-10-29|bedtime","seasonId":"TEST","date":"2026-10-29","activityId":"bedtime","done":true,"xp":6,"version":2,"deleted":false,"source":"HEALTH_SHEET","settled":true,"sourceCount":1,"sourceValue":null,"collected":true,"settlesAt":"2026-10-30T12:00:00+09:00"},{"recordId":"TEST|2026-10-30|eyecontact","seasonId":"TEST","date":"2026-10-30","activityId":"eyecontact","done":true,"xp":6,"version":1,"deleted":false},{"recordId":"TEST|2026-10-30|smalltalk","seasonId":"TEST","date":"2026-10-30","activityId":"smalltalk","done":true,"xp":6,"version":1,"deleted":false},{"recordId":"TEST|2026-10-30|protein","seasonId":"TEST","date":"2026-10-30","activityId":"protein","done":true,"xp":4,"version":1,"deleted":false},{"recordId":"TEST|2026-10-30|supplements","seasonId":"TEST","date":"2026-10-30","activityId":"supplements","done":true,"xp":4,"version":1,"deleted":false},{"recordId":"TEST|2026-10-30|strength","seasonId":"TEST","date":"2026-10-30","activityId":"strength","done":true,"xp":20,"version":2,"deleted":false,"source":"WORKOUT_SHEET","settled":true,"sourceCount":1,"settlesAt":"2026-10-31T12:00:00+09:00"},{"recordId":"TEST|2026-10-30|cardio","seasonId":"TEST","date":"2026-10-30","activityId":"cardio","done":true,"xp":22,"version":2,"deleted":false,"source":"WORKOUT_SHEET","settled":true,"sourceCount":1,"settlesAt":"2026-10-31T12:00:00+09:00"},{"recordId":"TEST|2026-10-30|steps","seasonId":"TEST","date":"2026-10-30","activityId":"steps","done":true,"xp":6,"version":2,"deleted":false,"source":"HEALTH_SHEET","settled":true,"sourceCount":1,"sourceValue":null,"collected":true,"settlesAt":"2026-10-31T12:00:00+09:00"},{"recordId":"TEST|2026-10-31|gambling-free","seasonId":"TEST","date":"2026-10-31","activityId":"gambling-free","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"TEST|2026-10-31|moderation","seasonId":"TEST","date":"2026-10-31","activityId":"moderation","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"TEST|2026-10-31|meditation","seasonId":"TEST","date":"2026-10-31","activityId":"meditation","done":true,"xp":6,"version":1,"deleted":false},{"recordId":"TEST|2026-10-31|protein","seasonId":"TEST","date":"2026-10-31","activityId":"protein","done":true,"xp":4,"version":1,"deleted":false},{"recordId":"TEST|2026-10-31|journal","seasonId":"TEST","date":"2026-10-31","activityId":"journal","done":true,"xp":18,"version":3,"deleted":false,"source":"JOURNAL_SHEET","settled":true,"sourceCount":1,"settlesAt":"2026-11-01T12:00:00+09:00"},{"recordId":"TEST|2026-10-31|sobriety","seasonId":"TEST","date":"2026-10-31","activityId":"sobriety","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"TEST|2026-10-31|budget","seasonId":"TEST","date":"2026-10-31","activityId":"budget","done":true,"xp":18,"version":1,"deleted":false},{"recordId":"TEST|2026-10-31|ga","seasonId":"TEST","date":"2026-10-31","activityId":"ga","done":true,"xp":25,"version":2,"deleted":false,"source":"GA_SHEET","settled":true,"sourceCount":1,"settlesAt":"2026-11-01T12:00:00+09:00"},{"recordId":"TEST|2026-10-31|supplements","seasonId":"TEST","date":"2026-10-31","activityId":"supplements","done":true,"xp":4,"version":1,"deleted":false},{"recordId":"TEST|2026-10-31|eyecontact","seasonId":"TEST","date":"2026-10-31","activityId":"eyecontact","done":true,"xp":6,"version":1,"deleted":false},{"recordId":"TEST|2026-10-31|smalltalk","seasonId":"TEST","date":"2026-10-31","activityId":"smalltalk","done":true,"xp":6,"version":1,"deleted":false},{"recordId":"TEST|2026-10-31|steps","seasonId":"TEST","date":"2026-10-31","activityId":"steps","done":true,"xp":6,"version":2,"deleted":false,"source":"HEALTH_SHEET","settled":true,"sourceCount":1,"sourceValue":null,"collected":true,"settlesAt":"2026-11-01T12:00:00+09:00"},{"recordId":"TEST|2026-10-31|sleep","seasonId":"TEST","date":"2026-10-31","activityId":"sleep","done":true,"xp":12,"version":2,"deleted":false,"source":"HEALTH_SHEET","settled":true,"sourceCount":1,"sourceValue":null,"collected":true,"settlesAt":"2026-11-01T12:00:00+09:00"},{"recordId":"S001|2026-11-01|sobriety","seasonId":"S001","date":"2026-11-01","activityId":"sobriety","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"S001|2026-11-01|gambling-free","seasonId":"S001","date":"2026-11-01","activityId":"gambling-free","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"S001|2026-11-01|protein","seasonId":"S001","date":"2026-11-01","activityId":"protein","done":true,"xp":4,"version":1,"deleted":false},{"recordId":"S001|2026-11-01|moderation","seasonId":"S001","date":"2026-11-01","activityId":"moderation","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"S001|2026-11-01|meditation","seasonId":"S001","date":"2026-11-01","activityId":"meditation","done":true,"xp":6,"version":1,"deleted":false},{"recordId":"S001|2026-11-01|eyecontact","seasonId":"S001","date":"2026-11-01","activityId":"eyecontact","done":true,"xp":6,"version":1,"deleted":false},{"recordId":"S001|2026-11-01|budget","seasonId":"S001","date":"2026-11-01","activityId":"budget","done":true,"xp":18,"version":1,"deleted":false},{"recordId":"S001|2026-11-01|journal","seasonId":"S001","date":"2026-11-01","activityId":"journal","done":true,"xp":18,"version":3,"deleted":false,"source":"JOURNAL_SHEET","settled":true,"sourceCount":1,"settlesAt":"2026-11-02T12:00:00+09:00"},{"recordId":"S001|2026-11-01|supplements","seasonId":"S001","date":"2026-11-01","activityId":"supplements","done":true,"xp":4,"version":1,"deleted":false},{"recordId":"S001|2026-11-01|strength","seasonId":"S001","date":"2026-11-01","activityId":"strength","done":true,"xp":20,"version":2,"deleted":false,"source":"WORKOUT_SHEET","settled":true,"sourceCount":1,"settlesAt":"2026-11-02T12:00:00+09:00"},{"recordId":"S001|2026-11-01|smalltalk","seasonId":"S001","date":"2026-11-01","activityId":"smalltalk","done":true,"xp":6,"version":1,"deleted":false},{"recordId":"S001|2026-11-02|english","seasonId":"S001","date":"2026-11-02","activityId":"english","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"S001|2026-11-02|sobriety","seasonId":"S001","date":"2026-11-02","activityId":"sobriety","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"S001|2026-11-02|gambling-free","seasonId":"S001","date":"2026-11-02","activityId":"gambling-free","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"S001|2026-11-02|moderation","seasonId":"S001","date":"2026-11-02","activityId":"moderation","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"S001|2026-11-02|supplements","seasonId":"S001","date":"2026-11-02","activityId":"supplements","done":true,"xp":4,"version":1,"deleted":false},{"recordId":"S001|2026-11-02|protein","seasonId":"S001","date":"2026-11-02","activityId":"protein","done":true,"xp":4,"version":1,"deleted":false},{"recordId":"S001|2026-11-02|meditation","seasonId":"S001","date":"2026-11-02","activityId":"meditation","done":true,"xp":6,"version":1,"deleted":false},{"recordId":"S001|2026-11-02|smalltalk","seasonId":"S001","date":"2026-11-02","activityId":"smalltalk","done":true,"xp":6,"version":1,"deleted":false},{"recordId":"S001|2026-11-02|eyecontact","seasonId":"S001","date":"2026-11-02","activityId":"eyecontact","done":true,"xp":6,"version":1,"deleted":false},{"recordId":"S001|2026-11-02|budget","seasonId":"S001","date":"2026-11-02","activityId":"budget","done":true,"xp":18,"version":1,"deleted":false},{"recordId":"S001|2026-11-02|journal","seasonId":"S001","date":"2026-11-02","activityId":"journal","done":true,"xp":18,"version":3,"deleted":false,"source":"JOURNAL_SHEET","settled":true,"sourceCount":1,"settlesAt":"2026-11-03T12:00:00+09:00"},{"recordId":"S001|2026-11-02|strength","seasonId":"S001","date":"2026-11-02","activityId":"strength","done":true,"xp":20,"version":2,"deleted":false,"source":"WORKOUT_SHEET","settled":true,"sourceCount":1,"settlesAt":"2026-11-03T12:00:00+09:00"},{"recordId":"S001|2026-11-02|bedtime","seasonId":"S001","date":"2026-11-02","activityId":"bedtime","done":true,"xp":6,"version":2,"deleted":false,"source":"HEALTH_SHEET","settled":true,"sourceCount":1,"sourceValue":null,"collected":true,"settlesAt":"2026-11-03T12:00:00+09:00"},{"recordId":"S001|2026-11-03|protein","seasonId":"S001","date":"2026-11-03","activityId":"protein","done":true,"xp":4,"version":1,"deleted":false},{"recordId":"S001|2026-11-03|supplements","seasonId":"S001","date":"2026-11-03","activityId":"supplements","done":true,"xp":4,"version":1,"deleted":false},{"recordId":"S001|2026-11-03|sobriety","seasonId":"S001","date":"2026-11-03","activityId":"sobriety","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"S001|2026-11-03|gambling-free","seasonId":"S001","date":"2026-11-03","activityId":"gambling-free","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"S001|2026-11-03|smalltalk","seasonId":"S001","date":"2026-11-03","activityId":"smalltalk","done":true,"xp":6,"version":1,"deleted":false},{"recordId":"S001|2026-11-03|eyecontact","seasonId":"S001","date":"2026-11-03","activityId":"eyecontact","done":true,"xp":6,"version":1,"deleted":false},{"recordId":"S001|2026-11-03|budget","seasonId":"S001","date":"2026-11-03","activityId":"budget","done":true,"xp":18,"version":1,"deleted":false},{"recordId":"S001|2026-11-03|english","seasonId":"S001","date":"2026-11-03","activityId":"english","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"S001|2026-11-03|journal","seasonId":"S001","date":"2026-11-03","activityId":"journal","done":true,"xp":18,"version":3,"deleted":false,"source":"JOURNAL_SHEET","settled":true,"sourceCount":1,"settlesAt":"2026-11-04T12:00:00+09:00"},{"recordId":"S001|2026-11-03|strength","seasonId":"S001","date":"2026-11-03","activityId":"strength","done":true,"xp":20,"version":2,"deleted":false,"source":"WORKOUT_SHEET","settled":true,"sourceCount":1,"settlesAt":"2026-11-04T12:00:00+09:00"},{"recordId":"S001|2026-11-03|moderation","seasonId":"S001","date":"2026-11-03","activityId":"moderation","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"S001|2026-11-04|english","seasonId":"S001","date":"2026-11-04","activityId":"english","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"S001|2026-11-04|journal","seasonId":"S001","date":"2026-11-04","activityId":"journal","done":true,"xp":18,"version":3,"deleted":false,"source":"JOURNAL_SHEET","settled":true,"sourceCount":1,"settlesAt":"2026-11-05T12:00:00+09:00"},{"recordId":"S001|2026-11-03|steps","seasonId":"S001","date":"2026-11-03","activityId":"steps","done":true,"xp":6,"version":2,"deleted":false,"source":"HEALTH_SHEET","settled":true,"sourceCount":1,"sourceValue":null,"collected":true,"settlesAt":"2026-11-04T12:00:00+09:00"},{"recordId":"S001|2026-11-04|eyecontact","seasonId":"S001","date":"2026-11-04","activityId":"eyecontact","done":true,"xp":6,"version":1,"deleted":false},{"recordId":"S001|2026-11-03|meditation","seasonId":"S001","date":"2026-11-03","activityId":"meditation","done":true,"xp":6,"version":1,"deleted":false},{"recordId":"S001|2026-11-04|supplements","seasonId":"S001","date":"2026-11-04","activityId":"supplements","done":true,"xp":4,"version":1,"deleted":false},{"recordId":"S001|2026-11-04|protein","seasonId":"S001","date":"2026-11-04","activityId":"protein","done":true,"xp":4,"version":1,"deleted":false},{"recordId":"S001|2026-11-04|gambling-free","seasonId":"S001","date":"2026-11-04","activityId":"gambling-free","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"S001|2026-11-04|sobriety","seasonId":"S001","date":"2026-11-04","activityId":"sobriety","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"S001|2026-11-04|smalltalk","seasonId":"S001","date":"2026-11-04","activityId":"smalltalk","done":true,"xp":6,"version":1,"deleted":false},{"recordId":"S001|2026-11-04|meditation","seasonId":"S001","date":"2026-11-04","activityId":"meditation","done":true,"xp":6,"version":1,"deleted":false},{"recordId":"S001|2026-11-04|moderation","seasonId":"S001","date":"2026-11-04","activityId":"moderation","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"S001|2026-11-04|ga","seasonId":"S001","date":"2026-11-04","activityId":"ga","done":true,"xp":25,"version":2,"deleted":false,"source":"GA_SHEET","settled":true,"sourceCount":1,"settlesAt":"2026-11-05T12:00:00+09:00"},{"recordId":"S001|2026-11-05|english","seasonId":"S001","date":"2026-11-05","activityId":"english","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"S001|2026-11-05|budget","seasonId":"S001","date":"2026-11-05","activityId":"budget","done":true,"xp":18,"version":1,"deleted":false},{"recordId":"S001|2026-11-04|steps","seasonId":"S001","date":"2026-11-04","activityId":"steps","done":true,"xp":6,"version":2,"deleted":false,"source":"HEALTH_SHEET","settled":true,"sourceCount":1,"sourceValue":null,"collected":true,"settlesAt":"2026-11-05T12:00:00+09:00"},{"recordId":"S001|2026-11-05|strength","seasonId":"S001","date":"2026-11-05","activityId":"strength","done":true,"xp":20,"version":2,"deleted":false,"source":"WORKOUT_SHEET","settled":true,"sourceCount":1,"settlesAt":"2026-11-06T12:00:00+09:00"},{"recordId":"S001|2026-11-05|journal","seasonId":"S001","date":"2026-11-05","activityId":"journal","done":true,"xp":18,"version":3,"deleted":false,"source":"JOURNAL_SHEET","settled":true,"sourceCount":1,"settlesAt":"2026-11-06T12:00:00+09:00"},{"recordId":"S001|2026-11-05|protein","seasonId":"S001","date":"2026-11-05","activityId":"protein","done":true,"xp":4,"version":1,"deleted":false},{"recordId":"S001|2026-11-05|supplements","seasonId":"S001","date":"2026-11-05","activityId":"supplements","done":true,"xp":4,"version":1,"deleted":false},{"recordId":"S001|2026-11-05|sobriety","seasonId":"S001","date":"2026-11-05","activityId":"sobriety","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"S001|2026-11-05|gambling-free","seasonId":"S001","date":"2026-11-05","activityId":"gambling-free","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"S001|2026-11-05|moderation","seasonId":"S001","date":"2026-11-05","activityId":"moderation","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"S001|2026-11-05|eyecontact","seasonId":"S001","date":"2026-11-05","activityId":"eyecontact","done":true,"xp":6,"version":1,"deleted":false},{"recordId":"S001|2026-11-05|smalltalk","seasonId":"S001","date":"2026-11-05","activityId":"smalltalk","done":true,"xp":6,"version":1,"deleted":false},{"recordId":"S001|2026-11-05|meditation","seasonId":"S001","date":"2026-11-05","activityId":"meditation","done":true,"xp":6,"version":1,"deleted":false},{"recordId":"S001|2026-11-05|steps","seasonId":"S001","date":"2026-11-05","activityId":"steps","done":true,"xp":6,"version":2,"deleted":false,"source":"HEALTH_SHEET","settled":true,"sourceCount":1,"sourceValue":null,"collected":true,"settlesAt":"2026-11-06T12:00:00+09:00"},{"recordId":"S001|2026-11-05|bedtime","seasonId":"S001","date":"2026-11-05","activityId":"bedtime","done":true,"xp":6,"version":2,"deleted":false,"source":"HEALTH_SHEET","settled":true,"sourceCount":1,"sourceValue":null,"collected":true,"settlesAt":"2026-11-06T12:00:00+09:00"},{"recordId":"S001|2026-11-06|protein","seasonId":"S001","date":"2026-11-06","activityId":"protein","done":true,"xp":4,"version":1,"deleted":false},{"recordId":"S001|2026-11-06|sobriety","seasonId":"S001","date":"2026-11-06","activityId":"sobriety","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"S001|2026-11-06|eyecontact","seasonId":"S001","date":"2026-11-06","activityId":"eyecontact","done":true,"xp":6,"version":1,"deleted":false},{"recordId":"S001|2026-11-06|meditation","seasonId":"S001","date":"2026-11-06","activityId":"meditation","done":true,"xp":6,"version":1,"deleted":false},{"recordId":"S001|2026-11-06|supplements","seasonId":"S001","date":"2026-11-06","activityId":"supplements","done":true,"xp":4,"version":1,"deleted":false},{"recordId":"S001|2026-11-06|moderation","seasonId":"S001","date":"2026-11-06","activityId":"moderation","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"S001|2026-11-06|gambling-free","seasonId":"S001","date":"2026-11-06","activityId":"gambling-free","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"S001|2026-11-06|budget","seasonId":"S001","date":"2026-11-06","activityId":"budget","done":true,"xp":18,"version":1,"deleted":false},{"recordId":"S001|2026-11-06|steps","seasonId":"S001","date":"2026-11-06","activityId":"steps","done":true,"xp":6,"version":2,"deleted":false,"source":"HEALTH_SHEET","settled":true,"sourceCount":1,"sourceValue":null,"collected":true,"settlesAt":"2026-11-07T12:00:00+09:00"},{"recordId":"S001|2026-11-06|bedtime","seasonId":"S001","date":"2026-11-06","activityId":"bedtime","done":true,"xp":6,"version":2,"deleted":false,"source":"HEALTH_SHEET","settled":true,"sourceCount":1,"sourceValue":null,"collected":true,"settlesAt":"2026-11-07T12:00:00+09:00"},{"recordId":"S001|2026-11-07|strength","seasonId":"S001","date":"2026-11-07","activityId":"strength","done":true,"xp":20,"version":2,"deleted":false,"source":"WORKOUT_SHEET","settled":true,"sourceCount":1,"settlesAt":"2026-11-08T12:00:00+09:00"},{"recordId":"S001|2026-11-07|supplements","seasonId":"S001","date":"2026-11-07","activityId":"supplements","done":true,"xp":4,"version":1,"deleted":false},{"recordId":"S001|2026-11-07|sobriety","seasonId":"S001","date":"2026-11-07","activityId":"sobriety","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"S001|2026-11-07|gambling-free","seasonId":"S001","date":"2026-11-07","activityId":"gambling-free","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"S001|2026-11-07|moderation","seasonId":"S001","date":"2026-11-07","activityId":"moderation","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"S001|2026-11-07|meditation","seasonId":"S001","date":"2026-11-07","activityId":"meditation","done":true,"xp":6,"version":1,"deleted":false},{"recordId":"S001|2026-11-07|eyecontact","seasonId":"S001","date":"2026-11-07","activityId":"eyecontact","done":true,"xp":6,"version":1,"deleted":false},{"recordId":"S001|2026-11-07|budget","seasonId":"S001","date":"2026-11-07","activityId":"budget","done":true,"xp":18,"version":1,"deleted":false},{"recordId":"S001|2026-11-07|ga","seasonId":"S001","date":"2026-11-07","activityId":"ga","done":true,"xp":25,"version":2,"deleted":false,"source":"GA_SHEET","settled":true,"sourceCount":1,"settlesAt":"2026-11-08T12:00:00+09:00"},{"recordId":"S001|2026-11-07|reading","seasonId":"S001","date":"2026-11-07","activityId":"reading","done":true,"xp":80,"version":2,"deleted":false,"source":"READING_SHEET","settled":true,"sourceCount":1,"settlesAt":"2026-11-08T12:00:00+09:00"},{"recordId":"S001|2026-11-07|bedtime","seasonId":"S001","date":"2026-11-07","activityId":"bedtime","done":true,"xp":6,"version":2,"deleted":false,"source":"HEALTH_SHEET","settled":true,"sourceCount":1,"sourceValue":null,"collected":true,"settlesAt":"2026-11-08T12:00:00+09:00"},{"recordId":"S001|2026-11-08|cardio","seasonId":"S001","date":"2026-11-08","activityId":"cardio","done":true,"xp":22,"version":2,"deleted":false,"source":"WORKOUT_SHEET","settled":true,"sourceCount":1,"settlesAt":"2026-11-09T12:00:00+09:00"},{"recordId":"S001|2026-11-08|journal","seasonId":"S001","date":"2026-11-08","activityId":"journal","done":true,"xp":18,"version":3,"deleted":false,"source":"JOURNAL_SHEET","settled":true,"sourceCount":1,"settlesAt":"2026-11-09T12:00:00+09:00"},{"recordId":"S001|2026-11-07|protein","seasonId":"S001","date":"2026-11-07","activityId":"protein","done":true,"xp":4,"version":1,"deleted":false},{"recordId":"S001|2026-11-08|smalltalk","seasonId":"S001","date":"2026-11-08","activityId":"smalltalk","done":true,"xp":6,"version":1,"deleted":false},{"recordId":"S001|2026-11-08|meditation","seasonId":"S001","date":"2026-11-08","activityId":"meditation","done":true,"xp":6,"version":1,"deleted":false},{"recordId":"S001|2026-11-08|gambling-free","seasonId":"S001","date":"2026-11-08","activityId":"gambling-free","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"S001|2026-11-08|moderation","seasonId":"S001","date":"2026-11-08","activityId":"moderation","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"S001|2026-11-08|eyecontact","seasonId":"S001","date":"2026-11-08","activityId":"eyecontact","done":true,"xp":6,"version":1,"deleted":false},{"recordId":"S001|2026-11-08|protein","seasonId":"S001","date":"2026-11-08","activityId":"protein","done":true,"xp":4,"version":1,"deleted":false},{"recordId":"S001|2026-11-08|supplements","seasonId":"S001","date":"2026-11-08","activityId":"supplements","done":true,"xp":4,"version":1,"deleted":false},{"recordId":"S001|2026-11-08|budget","seasonId":"S001","date":"2026-11-08","activityId":"budget","done":true,"xp":18,"version":1,"deleted":false},{"recordId":"S001|2026-11-08|marathon","seasonId":"S001","date":"2026-11-08","activityId":"marathon","done":true,"xp":300,"version":1,"deleted":false},{"recordId":"S001|2026-11-09|english","seasonId":"S001","date":"2026-11-09","activityId":"english","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"S001|2026-11-09|gambling-free","seasonId":"S001","date":"2026-11-09","activityId":"gambling-free","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"S001|2026-11-09|journal","seasonId":"S001","date":"2026-11-09","activityId":"journal","done":true,"xp":18,"version":3,"deleted":false,"source":"JOURNAL_SHEET","settled":true,"sourceCount":1,"settlesAt":"2026-11-10T12:00:00+09:00"},{"recordId":"S001|2026-11-09|moderation","seasonId":"S001","date":"2026-11-09","activityId":"moderation","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"S001|2026-11-09|sobriety","seasonId":"S001","date":"2026-11-09","activityId":"sobriety","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"S001|2026-11-08|steps","seasonId":"S001","date":"2026-11-08","activityId":"steps","done":true,"xp":6,"version":2,"deleted":false,"source":"HEALTH_SHEET","settled":true,"sourceCount":1,"sourceValue":null,"collected":true,"settlesAt":"2026-11-09T12:00:00+09:00"},{"recordId":"S001|2026-11-09|protein","seasonId":"S001","date":"2026-11-09","activityId":"protein","done":true,"xp":4,"version":1,"deleted":false},{"recordId":"S001|2026-11-09|smalltalk","seasonId":"S001","date":"2026-11-09","activityId":"smalltalk","done":true,"xp":6,"version":1,"deleted":false},{"recordId":"S001|2026-11-09|eyecontact","seasonId":"S001","date":"2026-11-09","activityId":"eyecontact","done":true,"xp":6,"version":1,"deleted":false},{"recordId":"S001|2026-11-09|supplements","seasonId":"S001","date":"2026-11-09","activityId":"supplements","done":true,"xp":4,"version":1,"deleted":false},{"recordId":"S001|2026-11-09|budget","seasonId":"S001","date":"2026-11-09","activityId":"budget","done":true,"xp":18,"version":1,"deleted":false},{"recordId":"S001|2026-11-08|bedtime","seasonId":"S001","date":"2026-11-08","activityId":"bedtime","done":true,"xp":6,"version":1,"deleted":false,"source":"HEALTH_SHEET","settled":true,"sourceCount":1,"sourceValue":null,"collected":true,"settlesAt":"2026-11-09T12:00:00+09:00"},{"recordId":"S001|2026-11-09|strength","seasonId":"S001","date":"2026-11-09","activityId":"strength","done":true,"xp":20,"version":2,"deleted":false,"source":"WORKOUT_SHEET","settled":true,"sourceCount":1,"settlesAt":"2026-11-10T12:00:00+09:00"},{"recordId":"S001|2026-11-09|bedtime","seasonId":"S001","date":"2026-11-09","activityId":"bedtime","done":true,"xp":6,"version":2,"deleted":false,"source":"HEALTH_SHEET","settled":true,"sourceCount":1,"sourceValue":null,"collected":true,"settlesAt":"2026-11-10T12:00:00+09:00"},{"recordId":"S001|2026-11-10|protein","seasonId":"S001","date":"2026-11-10","activityId":"protein","done":true,"xp":4,"version":1,"deleted":false},{"recordId":"S001|2026-11-10|sobriety","seasonId":"S001","date":"2026-11-10","activityId":"sobriety","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"S001|2026-11-10|gambling-free","seasonId":"S001","date":"2026-11-10","activityId":"gambling-free","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"S001|2026-11-10|moderation","seasonId":"S001","date":"2026-11-10","activityId":"moderation","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"S001|2026-11-10|eyecontact","seasonId":"S001","date":"2026-11-10","activityId":"eyecontact","done":true,"xp":6,"version":1,"deleted":false},{"recordId":"S001|2026-11-10|strength","seasonId":"S001","date":"2026-11-10","activityId":"strength","done":true,"xp":20,"version":2,"deleted":false,"source":"WORKOUT_SHEET","settled":true,"sourceCount":1,"settlesAt":"2026-11-11T12:00:00+09:00"},{"recordId":"S001|2026-11-10|supplements","seasonId":"S001","date":"2026-11-10","activityId":"supplements","done":true,"xp":4,"version":1,"deleted":false},{"recordId":"S001|2026-11-10|english","seasonId":"S001","date":"2026-11-10","activityId":"english","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"S001|2026-11-10|smalltalk","seasonId":"S001","date":"2026-11-10","activityId":"smalltalk","done":true,"xp":6,"version":1,"deleted":false},{"recordId":"S001|2026-11-10|budget","seasonId":"S001","date":"2026-11-10","activityId":"budget","done":true,"xp":18,"version":1,"deleted":false},{"recordId":"S001|2026-11-10|journal","seasonId":"S001","date":"2026-11-10","activityId":"journal","done":true,"xp":18,"version":3,"deleted":false,"source":"JOURNAL_SHEET","settled":true,"sourceCount":1,"settlesAt":"2026-11-11T12:00:00+09:00"},{"recordId":"S001|2026-11-10|meditation","seasonId":"S001","date":"2026-11-10","activityId":"meditation","done":true,"xp":6,"version":1,"deleted":false},{"recordId":"S001|2026-11-10|steps","seasonId":"S001","date":"2026-11-10","activityId":"steps","done":true,"xp":6,"version":2,"deleted":false,"source":"HEALTH_SHEET","settled":true,"sourceCount":1,"sourceValue":null,"collected":true,"settlesAt":"2026-11-11T12:00:00+09:00"},{"recordId":"S001|2026-11-10|sleep","seasonId":"S001","date":"2026-11-10","activityId":"sleep","done":true,"xp":12,"version":2,"deleted":false,"source":"HEALTH_SHEET","settled":true,"sourceCount":1,"sourceValue":null,"collected":true,"settlesAt":"2026-11-11T12:00:00+09:00"},{"recordId":"S001|2026-11-10|bedtime","seasonId":"S001","date":"2026-11-10","activityId":"bedtime","done":true,"xp":6,"version":2,"deleted":false,"source":"HEALTH_SHEET","settled":true,"sourceCount":1,"sourceValue":null,"collected":true,"settlesAt":"2026-11-11T12:00:00+09:00"},{"recordId":"S001|2026-11-11|gambling-free","seasonId":"S001","date":"2026-11-11","activityId":"gambling-free","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"S001|2026-11-11|english","seasonId":"S001","date":"2026-11-11","activityId":"english","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"S001|2026-11-11|eyecontact","seasonId":"S001","date":"2026-11-11","activityId":"eyecontact","done":true,"xp":6,"version":1,"deleted":false},{"recordId":"S001|2026-11-11|smalltalk","seasonId":"S001","date":"2026-11-11","activityId":"smalltalk","done":true,"xp":6,"version":1,"deleted":false},{"recordId":"S001|2026-11-11|supplements","seasonId":"S001","date":"2026-11-11","activityId":"supplements","done":true,"xp":4,"version":1,"deleted":false},{"recordId":"S001|2026-11-11|sobriety","seasonId":"S001","date":"2026-11-11","activityId":"sobriety","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"S001|2026-11-11|protein","seasonId":"S001","date":"2026-11-11","activityId":"protein","done":true,"xp":4,"version":1,"deleted":false},{"recordId":"S001|2026-11-11|moderation","seasonId":"S001","date":"2026-11-11","activityId":"moderation","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"S001|2026-11-11|ga","seasonId":"S001","date":"2026-11-11","activityId":"ga","done":true,"xp":25,"version":2,"deleted":false,"source":"GA_SHEET","settled":true,"sourceCount":1,"settlesAt":"2026-11-12T12:00:00+09:00"},{"recordId":"S001|2026-11-11|meditation","seasonId":"S001","date":"2026-11-11","activityId":"meditation","done":true,"xp":6,"version":1,"deleted":false},{"recordId":"S001|2026-11-11|budget","seasonId":"S001","date":"2026-11-11","activityId":"budget","done":true,"xp":18,"version":1,"deleted":false},{"recordId":"S001|2026-11-12|journal","seasonId":"S001","date":"2026-11-12","activityId":"journal","done":true,"xp":18,"version":3,"deleted":false,"source":"JOURNAL_SHEET","settled":true,"sourceCount":1,"settlesAt":"2026-11-13T12:00:00+09:00"},{"recordId":"S001|2026-11-11|steps","seasonId":"S001","date":"2026-11-11","activityId":"steps","done":true,"xp":6,"version":2,"deleted":false,"source":"HEALTH_SHEET","settled":true,"sourceCount":1,"sourceValue":null,"collected":true,"settlesAt":"2026-11-12T12:00:00+09:00"},{"recordId":"S001|2026-11-12|english","seasonId":"S001","date":"2026-11-12","activityId":"english","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"S001|2026-11-12|gambling-free","seasonId":"S001","date":"2026-11-12","activityId":"gambling-free","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"S001|2026-11-12|eyecontact","seasonId":"S001","date":"2026-11-12","activityId":"eyecontact","done":true,"xp":6,"version":1,"deleted":false},{"recordId":"S001|2026-11-12|smalltalk","seasonId":"S001","date":"2026-11-12","activityId":"smalltalk","done":true,"xp":6,"version":1,"deleted":false},{"recordId":"S001|2026-11-12|protein","seasonId":"S001","date":"2026-11-12","activityId":"protein","done":true,"xp":4,"version":1,"deleted":false},{"recordId":"S001|2026-11-12|supplements","seasonId":"S001","date":"2026-11-12","activityId":"supplements","done":true,"xp":4,"version":1,"deleted":false},{"recordId":"S001|2026-11-12|moderation","seasonId":"S001","date":"2026-11-12","activityId":"moderation","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"S001|2026-11-12|sobriety","seasonId":"S001","date":"2026-11-12","activityId":"sobriety","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"S001|2026-11-12|budget","seasonId":"S001","date":"2026-11-12","activityId":"budget","done":true,"xp":18,"version":1,"deleted":false},{"recordId":"S001|2026-11-12|strength","seasonId":"S001","date":"2026-11-12","activityId":"strength","done":true,"xp":20,"version":2,"deleted":false,"source":"WORKOUT_SHEET","settled":true,"sourceCount":1,"settlesAt":"2026-11-13T12:00:00+09:00"},{"recordId":"S001|2026-11-13|english","seasonId":"S001","date":"2026-11-13","activityId":"english","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"S001|2026-11-13|gambling-free","seasonId":"S001","date":"2026-11-13","activityId":"gambling-free","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"S001|2026-11-13|sobriety","seasonId":"S001","date":"2026-11-13","activityId":"sobriety","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"S001|2026-11-13|protein","seasonId":"S001","date":"2026-11-13","activityId":"protein","done":true,"xp":4,"version":1,"deleted":false},{"recordId":"S001|2026-11-12|steps","seasonId":"S001","date":"2026-11-12","activityId":"steps","done":true,"xp":6,"version":2,"deleted":false,"source":"HEALTH_SHEET","settled":true,"sourceCount":1,"sourceValue":null,"collected":true,"settlesAt":"2026-11-13T12:00:00+09:00"},{"recordId":"S001|2026-11-13|smalltalk","seasonId":"S001","date":"2026-11-13","activityId":"smalltalk","done":true,"xp":6,"version":1,"deleted":false},{"recordId":"S001|2026-11-13|journal","seasonId":"S001","date":"2026-11-13","activityId":"journal","done":true,"xp":18,"version":3,"deleted":false,"source":"JOURNAL_SHEET","settled":true,"sourceCount":1,"settlesAt":"2026-11-14T12:00:00+09:00"},{"recordId":"S001|2026-11-13|strength","seasonId":"S001","date":"2026-11-13","activityId":"strength","done":true,"xp":20,"version":2,"deleted":false,"source":"WORKOUT_SHEET","settled":true,"sourceCount":1,"settlesAt":"2026-11-14T12:00:00+09:00"},{"recordId":"S001|2026-11-13|eyecontact","seasonId":"S001","date":"2026-11-13","activityId":"eyecontact","done":true,"xp":6,"version":1,"deleted":false},{"recordId":"S001|2026-11-13|moderation","seasonId":"S001","date":"2026-11-13","activityId":"moderation","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"S001|2026-11-13|supplements","seasonId":"S001","date":"2026-11-13","activityId":"supplements","done":true,"xp":4,"version":1,"deleted":false},{"recordId":"S001|2026-11-14|meditation","seasonId":"S001","date":"2026-11-14","activityId":"meditation","done":true,"xp":6,"version":1,"deleted":false},{"recordId":"S001|2026-11-14|gambling-free","seasonId":"S001","date":"2026-11-14","activityId":"gambling-free","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"S001|2026-11-14|sobriety","seasonId":"S001","date":"2026-11-14","activityId":"sobriety","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"S001|2026-11-14|budget","seasonId":"S001","date":"2026-11-14","activityId":"budget","done":true,"xp":18,"version":1,"deleted":false},{"recordId":"S001|2026-11-14|journal","seasonId":"S001","date":"2026-11-14","activityId":"journal","done":true,"xp":18,"version":3,"deleted":false,"source":"JOURNAL_SHEET","settled":true,"sourceCount":1,"settlesAt":"2026-11-15T12:00:00+09:00"},{"recordId":"S001|2026-11-13|steps","seasonId":"S001","date":"2026-11-13","activityId":"steps","done":true,"xp":6,"version":2,"deleted":false,"source":"HEALTH_SHEET","settled":true,"sourceCount":1,"sourceValue":null,"collected":true,"settlesAt":"2026-11-14T12:00:00+09:00"},{"recordId":"S001|2026-11-14|eyecontact","seasonId":"S001","date":"2026-11-14","activityId":"eyecontact","done":true,"xp":6,"version":1,"deleted":false},{"recordId":"S001|2026-11-14|reading","seasonId":"S001","date":"2026-11-14","activityId":"reading","done":true,"xp":80,"version":2,"deleted":false,"source":"READING_SHEET","settled":true,"sourceCount":1,"settlesAt":"2026-11-15T12:00:00+09:00"},{"recordId":"S001|2026-11-14|protein","seasonId":"S001","date":"2026-11-14","activityId":"protein","done":true,"xp":4,"version":1,"deleted":false},{"recordId":"S001|2026-11-14|moderation","seasonId":"S001","date":"2026-11-14","activityId":"moderation","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"S001|2026-11-14|ga","seasonId":"S001","date":"2026-11-14","activityId":"ga","done":true,"xp":25,"version":2,"deleted":false,"source":"GA_SHEET","settled":true,"sourceCount":1,"settlesAt":"2026-11-15T12:00:00+09:00"},{"recordId":"S001|2026-11-14|smalltalk","seasonId":"S001","date":"2026-11-14","activityId":"smalltalk","done":true,"xp":6,"version":1,"deleted":false},{"recordId":"S001|2026-11-15|strength","seasonId":"S001","date":"2026-11-15","activityId":"strength","done":true,"xp":20,"version":4,"deleted":false,"source":"WORKOUT_SHEET","settled":true,"sourceCount":1,"settlesAt":"2026-11-16T12:00:00+09:00"},{"recordId":"S001|2026-11-15|journal","seasonId":"S001","date":"2026-11-15","activityId":"journal","done":true,"xp":18,"version":3,"deleted":false,"source":"JOURNAL_SHEET","settled":true,"sourceCount":1,"settlesAt":"2026-11-16T12:00:00+09:00"},{"recordId":"S001|2026-11-15|protein","seasonId":"S001","date":"2026-11-15","activityId":"protein","done":true,"xp":4,"version":1,"deleted":false},{"recordId":"S001|2026-11-15|supplements","seasonId":"S001","date":"2026-11-15","activityId":"supplements","done":true,"xp":4,"version":1,"deleted":false},{"recordId":"S001|2026-11-15|sobriety","seasonId":"S001","date":"2026-11-15","activityId":"sobriety","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"S001|2026-11-15|gambling-free","seasonId":"S001","date":"2026-11-15","activityId":"gambling-free","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"S001|2026-11-15|moderation","seasonId":"S001","date":"2026-11-15","activityId":"moderation","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"S001|2026-11-15|meditation","seasonId":"S001","date":"2026-11-15","activityId":"meditation","done":true,"xp":6,"version":1,"deleted":false},{"recordId":"S001|2026-11-15|eyecontact","seasonId":"S001","date":"2026-11-15","activityId":"eyecontact","done":true,"xp":6,"version":1,"deleted":false},{"recordId":"S001|2026-11-15|smalltalk","seasonId":"S001","date":"2026-11-15","activityId":"smalltalk","done":true,"xp":6,"version":1,"deleted":false},{"recordId":"S001|2026-11-15|budget","seasonId":"S001","date":"2026-11-15","activityId":"budget","done":true,"xp":18,"version":1,"deleted":false},{"recordId":"S001|2026-11-16|english","seasonId":"S001","date":"2026-11-16","activityId":"english","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"S001|2026-11-16|gambling-free","seasonId":"S001","date":"2026-11-16","activityId":"gambling-free","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"S001|2026-11-16|sobriety","seasonId":"S001","date":"2026-11-16","activityId":"sobriety","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"S001|2026-11-16|journal","seasonId":"S001","date":"2026-11-16","activityId":"journal","done":true,"xp":18,"version":3,"deleted":false,"source":"JOURNAL_SHEET","settled":true,"sourceCount":1,"settlesAt":"2026-11-17T12:00:00+09:00"},{"recordId":"S001|2026-11-16|supplements","seasonId":"S001","date":"2026-11-16","activityId":"supplements","done":true,"xp":4,"version":1,"deleted":false},{"recordId":"S001|2026-11-16|protein","seasonId":"S001","date":"2026-11-16","activityId":"protein","done":true,"xp":4,"version":1,"deleted":false},{"recordId":"S001|2026-11-16|budget","seasonId":"S001","date":"2026-11-16","activityId":"budget","done":true,"xp":18,"version":1,"deleted":false},{"recordId":"S001|2026-11-16|moderation","seasonId":"S001","date":"2026-11-16","activityId":"moderation","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"S001|2026-11-16|strength","seasonId":"S001","date":"2026-11-16","activityId":"strength","done":true,"xp":20,"version":2,"deleted":false,"source":"WORKOUT_SHEET","settled":true,"sourceCount":1,"settlesAt":"2026-11-17T12:00:00+09:00"},{"recordId":"S001|2026-11-17|journal","seasonId":"S001","date":"2026-11-17","activityId":"journal","done":true,"xp":0,"version":1,"deleted":false,"source":"JOURNAL_SHEET","settled":false,"sourceCount":1,"settlesAt":"2026-11-18T12:00:00+09:00"},{"recordId":"S001|2026-11-16|steps","seasonId":"S001","date":"2026-11-16","activityId":"steps","done":true,"xp":6,"version":2,"deleted":false,"source":"HEALTH_SHEET","settled":true,"sourceCount":1,"sourceValue":null,"collected":true,"settlesAt":"2026-11-17T12:00:00+09:00"},{"recordId":"S001|2026-11-17|strength","seasonId":"S001","date":"2026-11-17","activityId":"strength","done":true,"xp":0,"version":1,"deleted":false,"source":"WORKOUT_SHEET","settled":false,"sourceCount":1,"settlesAt":"2026-11-18T12:00:00+09:00"},{"recordId":"S001|2026-11-17|protein","seasonId":"S001","date":"2026-11-17","activityId":"protein","done":true,"xp":4,"version":1,"deleted":false},{"recordId":"S001|2026-11-17|supplements","seasonId":"S001","date":"2026-11-17","activityId":"supplements","done":true,"xp":4,"version":1,"deleted":false},{"recordId":"S001|2026-11-17|gambling-free","seasonId":"S001","date":"2026-11-17","activityId":"gambling-free","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"S001|2026-11-17|moderation","seasonId":"S001","date":"2026-11-17","activityId":"moderation","done":true,"xp":8,"version":1,"deleted":false},{"recordId":"S001|2026-11-17|eyecontact","seasonId":"S001","date":"2026-11-17","activityId":"eyecontact","done":true,"xp":6,"version":1,"deleted":false},{"recordId":"S001|2026-11-17|smalltalk","seasonId":"S001","date":"2026-11-17","activityId":"smalltalk","done":true,"xp":6,"version":1,"deleted":false},{"recordId":"S001|2026-11-17|sobriety","seasonId":"S001","date":"2026-11-17","activityId":"sobriety","done":true,"xp":8,"version":3,"deleted":false}],"growthFloors":[{"seasonId":"TEST","points":66,"through":"2026-10-31","settledAt":"2026-11-17T03:00:00.000Z"},{"seasonId":"S001","points":66,"through":"2026-11-16","settledAt":"2026-11-17T03:00:00.000Z"}]};
 
       function normalizeDateStr(v, recordId) {
         if (typeof v === 'number' && Number.isFinite(v) && v > 20000 && v < 100000) {
@@ -245,6 +311,10 @@
         return '';
       }
 
+      // V4 normalizeClient:
+      // - INITIAL_SHEET_SEED, 로컬 스냅샷, 자동활동 캐시, 수동 오버라이드 병합을 제거하고 서버 데이터(raw.records)만 신뢰
+      // - prev.done && !item.done 강제 보호를 제거하고 오직 version 기준으로 최신 상태를 채택
+      // - 브라우저가 임의로 settled=true 및 xp를 생성하지 않고 서버 정산값을 그대로 신뢰 (단, 정산 시각 이전 자동활동은 미정산 강제)
       function normalizeClient(raw) {
         if (!raw || typeof raw !== 'object') raw = {};
         const nowMs = Date.now();
@@ -254,40 +324,33 @@
         const AUTO_IDS = new Set(['steps', 'sleep', 'bedtime', 'strength', 'cardio', 'ga', 'reading', 'journal']);
         const HEALTH_IDS = new Set(['steps', 'sleep', 'bedtime']);
 
-        // 1) 시트 기본 시드 + app.html 로컬 확정 스냅샷 + 자동활동 캐시 + 기존 메모리 캐시 + 입력 raw 순서로 병합하여 새로고침 시 깜빡임/초기화 원천 차단
-        const combinedInputRecords = [
-          ...toArray(INITIAL_SHEET_SEED.records),
-          ...loadAppConfirmedSnapshot(),
-          ...loadSyncedAutoCache(),
-          ...(cachedClient && Array.isArray(cachedClient.records) ? cachedClient.records : []),
-          ...toArray(raw.records)
-        ];
-
-        for (const r of combinedInputRecords) {
+        for (const r of toArray(raw.records)) {
           if (!r || !r.activityId) continue;
           const date = normalizeDateStr(r.date, r.recordId);
           if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) continue;
           const activityId = String(r.activityId);
           const sId = seasonForDate(date).id;
           const key = `${sId}|${date}|${activityId}`;
-          const done = r.done === true;
-          let xp = Number.isSafeInteger(Number(r.xp)) && Number(r.xp) >= 0 ? Number(r.xp) : 0;
+          const deleted = r.deleted === true;
+          const done = !deleted && r.done === true;
+          let xp = done && Number.isSafeInteger(Number(r.xp)) && Number(r.xp) >= 0 ? Number(r.xp) : 0;
           const version = Number.isInteger(Number(r.version)) && Number(r.version) >= 0 ? Number(r.version) : 1;
           const isReading = r.source === 'READING_SHEET' || activityId === 'reading';
           const sourceCount = isReading
             ? (done ? Math.max(1, Math.floor(Number(r.sourceCount) || 1)) : 0)
-            : (Number(r.sourceCount) || (done ? 1 : 0));
+            : (done ? Math.max(1, Math.floor(Number(r.sourceCount) || 1)) : 0);
 
           const isAuto = Boolean(r.source) || AUTO_IDS.has(activityId);
           const isHealth = r.source === 'HEALTH_SHEET' || HEALTH_IDS.has(activityId);
-          const collectsAt = shiftDateKey(date, 1) + 'T11:00:00+09:00';
+          const collectsAt = shiftDateKey(date, 1) + 'T11:10:00+09:00';
           const settlesAt = r.settlesAt || (shiftDateKey(date, 1) + 'T12:00:00+09:00');
 
           let finalDone = done;
-          let finalCollected = isHealth ? !!r.collected : true;
+          let finalCollected = isHealth ? Boolean(r.collected) : finalDone;
           let finalSourceValue = r.sourceValue ?? null;
-          let settled = typeof r.settled === 'boolean' ? r.settled : true;
+          let settled = isAuto ? Boolean(r.settled) : true;
 
+          // 건강데이터: 다음 날 11:10 이전에는 수집·확정 불가
           if (isHealth && nowMs < Date.parse(collectsAt)) {
             finalDone = false;
             finalCollected = false;
@@ -295,15 +358,11 @@
             settled = false;
             xp = 0;
           } else if (isAuto && nowMs < Date.parse(settlesAt)) {
+            // 모든 자동활동: 다음 날 낮 12시 이전에는 절대 확정(settled)하지 않음
             settled = false;
             xp = 0;
-          } else if (isAuto && finalDone && !settled && nowMs >= Date.parse(settlesAt)) {
-            if (!isHealth || finalCollected) {
-              settled = true;
-              if (xp === 0) {
-                xp = (isReading ? Math.max(1, sourceCount) : 1) * (ACTIVITIES_XP[activityId] || 0);
-              }
-            }
+          } else if (isAuto && !settled) {
+            xp = 0;
           }
 
           const item = {
@@ -312,9 +371,9 @@
             date,
             activityId,
             done: finalDone,
-            xp,
+            xp: finalDone ? xp : 0,
             version,
-            deleted: r.deleted === true,
+            deleted,
             ...(isAuto ? {
               source: r.source || (isHealth ? 'HEALTH_SHEET' : isReading ? 'READING_SHEET' : activityId === 'journal' ? 'JOURNAL_SHEET' : activityId === 'ga' ? 'GA_SHEET' : 'WORKOUT_SHEET'),
               settled,
@@ -325,44 +384,14 @@
           };
 
           const prev = map.get(key);
-          if (!prev) {
-            map.set(key, item);
-          } else if (isAuto) {
-            // 자동체크 항목(근력운동·일기쓰기·독서·GA·건강)은 완료(done: true)된 기록이 구버전 미완료 데이터에 의해 절대 풀리지 않도록 보호
-            if (prev.done && !item.done) {
-              continue;
-            }
-            if ((item.done && !prev.done) || item.version >= prev.version) {
-              map.set(key, item);
-            }
-          } else if (item.version >= prev.version) {
+          if (!prev || item.version >= prev.version) {
             map.set(key, item);
           }
         }
 
-        const manualOverrides = loadManualOverrides();
-        for (const ov of Object.values(manualOverrides)) {
-          if (!ov || !ov.date || !ov.activityId || AUTO_IDS.has(String(ov.activityId))) continue;
-          const sId = seasonForDate(ov.date).id;
-          const key = `${sId}|${ov.date}|${ov.activityId}`;
-          const prev = map.get(key);
-          if (!prev || (Number(ov.version) || 0) >= (Number(prev.version) || 0)) {
-            map.set(key, {
-              recordId: key,
-              seasonId: sId,
-              date: String(ov.date),
-              activityId: String(ov.activityId),
-              done: ov.done === true,
-              xp: ov.done === true ? (Number(ov.xp) || ACTIVITIES_XP[ov.activityId] || 0) : 0,
-              version: Math.max(1, Number(ov.version) || 1),
-              deleted: false
-            });
-          }
-        }
         const recordsList = [...map.values()];
-
         const floorMap = new Map();
-        for (const g of [...toArray(INITIAL_SHEET_SEED.growthFloors), ...toArray(raw.growthFloors)]) {
+        for (const g of toArray(raw.growthFloors)) {
           const sId = String(g.seasonId || 'S001');
           const prev = floorMap.get(sId);
           floorMap.set(sId, {
@@ -374,23 +403,23 @@
         }
 
         for (const s of allSeasonsUpToToday()) {
-          const settledXp = recordsList.reduce((sum, r) => {
-            if (r.seasonId !== s.id || !r.done || r.deleted || r.settled === false) return sum;
-            if (s.id !== 'TEST' && r.date > yesterday) return sum;
-            return sum + (Number(r.xp) || 0);
-          }, 0);
-          const calcPoints = Math.floor(settledXp / 100) * 3;
-          const prev = floorMap.get(s.id);
-          floorMap.set(s.id, {
-            seasonId: s.id,
-            points: Math.max(prev ? prev.points : 0, calcPoints),
-            through: prev && prev.through ? prev.through : (s.id === 'TEST' ? '2026-10-31' : yesterday),
-            settledAt: prev && prev.settledAt ? prev.settledAt : new Date().toISOString()
-          });
+          if (!floorMap.has(s.id)) {
+            const settledXp = recordsList.reduce((sum, r) => {
+              if (r.seasonId !== s.id || !r.done || r.deleted || r.settled === false) return sum;
+              if (s.id !== 'TEST' && r.date > yesterday) return sum;
+              return sum + (Number(r.xp) || 0);
+            }, 0);
+            floorMap.set(s.id, {
+              seasonId: s.id,
+              points: Math.floor(settledXp / 100) * 3,
+              through: s.id === 'TEST' ? '2026-10-31' : yesterday,
+              settledAt: new Date().toISOString()
+            });
+          }
         }
 
         const adventuresBySeason = raw.adventuresBySeason && typeof raw.adventuresBySeason === 'object' ? raw.adventuresBySeason : {};
-        for (const [k, v] of Object.entries(adventuresBySeason)) {
+        for (const [, v] of Object.entries(adventuresBySeason)) {
           if (v && typeof v === 'object') v.entries = toArray(v.entries);
         }
 
@@ -408,15 +437,22 @@
         const m = raw && typeof raw === 'object' ? raw : {};
         const statsBySeason = m.statsBySeason && typeof m.statsBySeason === 'object' ? m.statsBySeason : {};
         const skillsBySeason = m.skillsBySeason && typeof m.skillsBySeason === 'object' ? m.skillsBySeason : {};
-        for (const [k, v] of Object.entries(skillsBySeason)) {
+        const careersBySeason = m.careersBySeason && typeof m.careersBySeason === 'object' ? m.careersBySeason : {};
+        for (const [, v] of Object.entries(skillsBySeason)) {
           if (v && v.state) {
             v.state.learned = toArray(v.state.learned);
             v.state.legends = toArray(v.state.legends).map(l => ({ ...l, ingredients: toArray(l.ingredients), trees: toArray(l.trees) }));
           }
         }
+        for (const [, c] of Object.entries(careersBySeason)) {
+          if (c && typeof c === 'object') {
+            c.history = toArray(c.history);
+          }
+        }
         return {
           statsBySeason,
           skillsBySeason,
+          careersBySeason,
           rewards: toArray(m.rewards),
           ai: m.ai || { configured: false, month: todayKst().slice(0, 7), used: 0, limit: 10, jobs: [] }
         };
@@ -430,47 +466,53 @@
       function clientRecordSignature(c) {
         if (!c || !Array.isArray(c.records)) return '';
         return c.records
-          .filter(r => r && r.done && !r.deleted)
-          .map(r => `${r.recordId}:${r.xp}:${r.settled ? 1 : 0}`)
+          .map(r => `${r.recordId}:${r.done ? 1 : 0}:${r.deleted ? 1 : 0}:${r.xp}:${r.version}:${r.settled ? 1 : 0}`)
           .sort()
           .join('|');
       }
 
+      // 조회(fetchFbClient) 중에는 절대 Firebase에 쓰기(writeFb)를 수행하지 않음!
       async function fetchFbClient() {
         try {
           const r = await fetch(`${cleanFbUrl}/lifequest/client.json`, { cache: 'no-store' });
-          const d = r.ok ? await r.json() : null;
-          const rawRecords = toArray(d && d.records);
+          if (!r.ok) return cachedClient;
+          const d = await r.json();
+          if (!d || typeof d !== 'object') return cachedClient;
           const norm = normalizeClient(d);
-          if (norm && norm.records.length) {
-            cachedClient = norm;
-            saveSyncedAutoCache(norm.records);
-            // Firebase에 누락된 시트 자동체크 기록(예: 11/17 근력운동·일기쓰기)이 있으면 즉시 Firebase에도 반영하여 동기화 완성!
-            const rawDoneCount = rawRecords.filter(x => x && x.done).length;
-            const normDoneCount = norm.records.filter(x => x && x.done).length;
-            if (rawRecords.length < norm.records.length || rawDoneCount !== normDoneCount) {
-              writeFb('client', norm);
-            }
-            return norm;
-          }
+          cachedClient = norm;
+          return norm;
         } catch (_) {
-          const fallback = normalizeClient(INITIAL_SHEET_SEED);
-          if (fallback) cachedClient = fallback;
-          return fallback;
+          return cachedClient;
         }
-        return normalizeClient(INITIAL_SHEET_SEED);
       }
 
       async function fetchFbMeta() {
         try {
           const r = await fetch(`${cleanFbUrl}/lifequest/meta.json`, { cache: 'no-store' });
-          const d = r.ok ? await r.json() : null;
+          if (!r.ok) return cachedMeta || normalizeMeta(null);
+          const d = await r.json();
           cachedMeta = normalizeMeta(d);
           return cachedMeta;
         } catch (_) {
-          cachedMeta = normalizeMeta(null);
+          cachedMeta = cachedMeta || normalizeMeta(null);
           return cachedMeta;
         }
+      }
+
+      // HTTP 상태 코드 검증: 실패 시 예외를 발생시켜 호출자가 인지하도록 수정
+      async function writeFb(path, data) {
+        const cleanPath = String(path).replace(/^\/+/, '');
+        const res = await fetch(`${cleanFbUrl}/lifequest/${cleanPath}.json`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(data)
+        });
+        if (!res.ok) {
+          const err = new Error('FIREBASE_WRITE_FAILED_' + res.status);
+          err.code = 'CONNECTION_FAILED';
+          throw err;
+        }
+        return true;
       }
 
       const prefetchShellPromise = fetch('./app.html')
@@ -481,6 +523,7 @@
       const prefetchMetaPromise = fetchFbMeta();
 
       let bridgeSource = null;
+      let bridgeOrigin = null;
       let resolveBridgeReady = null;
       const pending = new Map();
       const bridgeReady = new Promise(resolve => { resolveBridgeReady = resolve; });
@@ -492,6 +535,7 @@
         if (event.data.type === 'ready') {
           if (!bridgeSource) {
             bridgeSource = event.source;
+            bridgeOrigin = event.origin;
             resolveBridgeReady();
           }
           return;
@@ -517,7 +561,11 @@
         await Promise.race([
           bridgeReady,
           new Promise((_, reject) => {
-            waitTimer = setTimeout(() => reject(new Error('시트 브리지 연결 대기 초과')), 15000);
+            waitTimer = setTimeout(() => {
+              const err = new Error('시트 브리지 연결 대기 초과');
+              err.code = 'UPSTREAM_TIMEOUT';
+              reject(err);
+            }, 15000);
           })
         ]).finally(() => clearTimeout(waitTimer));
 
@@ -525,21 +573,13 @@
           const id = crypto.randomUUID ? crypto.randomUUID() : String(Date.now() + Math.random());
           const timer = setTimeout(() => {
             pending.delete(id);
-            reject(new Error('시트 브리지 응답 시간 초과'));
+            const err = new Error('시트 브리지 응답 시간 초과');
+            err.code = 'UPSTREAM_TIMEOUT';
+            reject(err);
           }, 25000);
           pending.set(id, { resolve, reject, timer });
-          bridgeSource.postMessage({ channel: CHANNEL, id, payload }, '*');
+          bridgeSource.postMessage({ channel: CHANNEL, id, payload }, bridgeOrigin || '*');
         });
-      }
-
-      async function writeFb(path, data) {
-        try {
-          await fetch(`${cleanFbUrl}/lifequest/${path}.json`, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(data)
-          });
-        } catch (_) {}
       }
 
       async function syncRecoveryHabitToGrowthDashboard(activityId, records) {
@@ -564,31 +604,106 @@
         } catch (_) {}
       }
 
-      function buildCareerForSeason(seasonId, records, meta) {
+      // 주간 전직 이력(careersBySeason) 보존 및 회차별 직업 산출
+      const JOB_CATALOG = {
+        vitality: [
+          { name: '선봉 돌격기사', mode: '전투 계열', rarity: '왕립 정예', tree: 'combat', description: '강인한 체력으로 전선을 돌파하는 전위 기사.', reason: '체력 능력치 우세', effect: { name: '강철 추진력', text: '체력 판정 보너스' }, appearance: { theme: 'ember', scene: 'battlement', costume: '붉은 강철 견갑과 기사단 망토', palette: '진홍과 강철', background: '왕성 성벽', prop: '⚔', propLabel: '돌격 대검' } },
+          { name: '성벽 파수대장', mode: '전투 계열', rarity: '왕립 상급', tree: 'combat', description: '지치지 않는 호흡으로 북쪽 성벽의 최전선을 지휘하는 대장.', reason: '체력 훈련 누적 및 실전 돌파', effect: { name: '전열 유지', text: '장기전 체력 보너스' }, appearance: { theme: 'iron', scene: 'forge', costume: '흑철 갑주와 붉은 휘장', palette: '강철과 화염', background: '왕립 병기창', prop: '⚔', propLabel: '중장 대검' } }
+        ],
+        intelligence: [
+          { name: '왕립 비전학자', mode: '마법 계열', rarity: '왕립 정예', tree: 'magic', description: '지식과 탐구로 세계의 규칙을 해석하는 마도 학자.', reason: '지능 능력치 우세', effect: { name: '현실 주석', text: '지능 판정 보너스' }, appearance: { theme: 'arcane', scene: 'library', costume: '별빛 학자 로브', palette: '자수정과 은빛', background: '왕립 대도서관', prop: '🔮', propLabel: '비전 보주' } },
+          { name: '천문탑 수석서기', mode: '마법 계열', rarity: '왕립 상급', tree: 'magic', description: '고대 문헌과 별자리의 궤적을 기록해 미래의 변수를 계산하는 수석 학자.', reason: '독서·학습 기록 누적', effect: { name: '별자리 연산', text: '비전 해석 보너스' }, appearance: { theme: 'moon', scene: 'observatory', costume: '은빛 천문관 예복', palette: '청람과 은빛', background: '왕립 천문탑', prop: '🔮', propLabel: '성좌 관측구' } }
+        ],
+        charisma: [
+          { name: '황금비율 연금술사', mode: '연금술 계열', rarity: '왕립 정예', tree: 'alchemy', description: '대화와 조합으로 불가능한 거래를 성사시키는 연금술사.', reason: '매력 능력치 우세', effect: { name: '만능 배합', text: '매력 판정 보너스' }, appearance: { theme: 'elixir', scene: 'laboratory', costume: '연금술사 가죽 앞치마와 예복', palette: '에메랄드와 황동', background: '연금술 공방', prop: '⚗️', propLabel: '비약 플라스크' } },
+          { name: '왕립 교역특사', mode: '연금술 계열', rarity: '왕립 상급', tree: 'alchemy', description: '어색한 침묵도 황금빛 계약으로 바꾸는 길드 최고의 협상가.', reason: '관계·소통 실천 누적', effect: { name: '신뢰의 인장', text: '협상 판정 보너스' }, appearance: { theme: 'amber', scene: 'market', costume: '황금 자수 외교관 코트', palette: '호박빛과 녹금', background: '왕도 교역광장', prop: '⚗️', propLabel: '특사 인장함' } }
+        ],
+        willpower: [
+          { name: '불굴의 성채수호자', mode: '수호 계열', rarity: '왕립 정예', tree: 'guardian', description: '유혹과 폭풍 앞에서도 흔들리지 않는 규율의 수호자.', reason: '의지 능력치 우세', effect: { name: '철벽 결재', text: '의지 판정 보너스' }, appearance: { theme: 'ward', scene: 'gate', costume: '수호자 성기사 망토', palette: '청록과 황금', background: '변경 성문', prop: '🛡️', propLabel: '수호 방패' } },
+          { name: '침묵의 서약집행관', mode: '수호 계열', rarity: '왕립 상급', tree: 'guardian', description: '매일의 절제와 성찰로 자신을 다스려 길드의 규범이 된 집행관.', reason: '규율·성찰 활동 누적', effect: { name: '불동심', text: '유혹 저항 보너스' }, appearance: { theme: 'royal', scene: 'citadel', costume: '성채 집행관 예장', palette: '백금과 청록', background: '왕립 내성 성소', prop: '🛡️', propLabel: '서약의 방패' } }
+        ],
+        agility: [
+          { name: '바람길 개척자', mode: '탐험 계열', rarity: '왕립 정예', tree: 'explore', description: '누구보다 먼저 움직여 숨겨진 길을 찾아내는 탐험가.', reason: '민첩 능력치 우세', effect: { name: '샛길 발견', text: '민첩 판정 보너스' }, appearance: { theme: 'teal', scene: 'woodland', costume: '경량 정찰 망토', palette: '숲빛과 가죽', background: '초보자의 숲', prop: '🧭', propLabel: '탐험 나침반' } },
+          { name: '지평선 선도대원', mode: '탐험 계열', rarity: '왕립 상급', tree: 'explore', description: '만 보의 발걸음과 거침없는 도전으로 미지의 지도를 완성하는 선도자.', reason: '걸음·도전 기록 누적', effect: { name: '질풍 행군', text: '탐험 판정 보너스' }, appearance: { theme: 'dawn', scene: 'ruins', costume: '원정대 가죽 코트', palette: '새벽빛과 청록', background: '고대 유적 전망대', prop: '🧭', propLabel: '별빛 육분의' } }
+        ]
+      };
+
+      async function buildCareerForSeason(seasonId, records, meta, persistIfChanged = false) {
         const sObj = allSeasonsUpToToday().find(s => s.id === seasonId) || seasonForDate(todayKst());
+        if (seasonId === 'TEST') {
+          return {
+            ok: true,
+            season: 'TEST',
+            beta: true,
+            current: null,
+            history: [],
+            next: { round: 1, at: '2026-11-08T12:00:00+09:00' },
+            seasons: allSeasonsUpToToday()
+          };
+        }
+
         const stats = meta.statsBySeason?.[seasonId]?.values || ZERO_STATS;
-        const topEntry = Object.entries(stats).sort((a, b) => b[1] - a[1])[0] || ['willpower', 0];
-        const jobMap = {
-          vitality: { name: '선봉 돌격기사', mode: '전투 계열', rarity: '왕립 정예', tree: 'combat', description: '강인한 체력으로 전선을 돌파하는 전위 기사.', reason: '체력 능력치 우세', effect: { name: '강철 추진력', text: '체력 판정 보너스' }, appearance: { theme: 'ember', scene: 'battlement', costume: '붉은 강철 견갑과 기사단 망토', palette: '진홍과 강철', background: '왕성 성벽', prop: '⚔', propLabel: '돌격 대검' } },
-          intelligence: { name: '왕립 비전학자', mode: '마법 계열', rarity: '왕립 정예', tree: 'magic', description: '지식과 탐구로 세계의 규칙을 해석하는 마도 학자.', reason: '지능 능력치 우세', effect: { name: '현실 주석', text: '지능 판정 보너스' }, appearance: { theme: 'arcane', scene: 'library', costume: '별빛 학자 로브', palette: '자수정과 은빛', background: '왕립 대도서관', prop: '🔮', propLabel: '비전 보주' } },
-          charisma: { name: '황금비율 연금술사', mode: '연금술 계열', rarity: '왕립 정예', tree: 'alchemy', description: '대화와 조합으로 불가능한 거래를 성사시키는 연금술사.', reason: '매력 능력치 우세', effect: { name: '만능 배합', text: '매력 판정 보너스' }, appearance: { theme: 'elixir', scene: 'laboratory', costume: '연금술사 가죽 앞치마와 예복', palette: '에메랄드와 황동', background: '연금술 공방', prop: '⚗️', propLabel: '비약 플라스크' } },
-          willpower: { name: '불굴의 성채수호자', mode: '수호 계열', rarity: '왕립 정예', tree: 'guardian', description: '유혹과 폭풍 앞에서도 흔들리지 않는 규율의 수호자.', reason: '의지 능력치 우세', effect: { name: '철벽 결재', text: '의지 판정 보너스' }, appearance: { theme: 'ward', scene: 'gate', costume: '수호자 성기사 망토', palette: '청록과 황금', background: '변경 성문', prop: '🛡️', propLabel: '수호 방패' } },
-          agility: { name: '바람길 개척자', mode: '탐험 계열', rarity: '왕립 정예', tree: 'explore', description: '누구보다 먼저 움직여 숨겨진 길을 찾아내는 탐험가.', reason: '민첩 능력치 우세', effect: { name: '샛길 발견', text: '민첩 판정 보너스' }, appearance: { theme: 'teal', scene: 'woodland', costume: '경량 정찰 망토', palette: '숲빛과 가죽', background: '초보자의 숲', prop: '🧭', propLabel: '탐험 나침반' } }
-        };
-        const chosen = jobMap[topEntry[0]] || jobMap.willpower;
-        const current = {
-          round: 1,
-          at: sObj.start + 'T03:00:00.000Z',
-          job: chosen,
-          appearance: chosen.appearance
-        };
+        const firstAnchorMs = Date.parse(shiftDateKey(sObj.start, 7) + 'T12:00:00+09:00');
+        const nowMs = Date.now();
+        const dueRounds = nowMs < firstAnchorMs
+          ? 0
+          : Math.min(12, Math.floor((nowMs - firstAnchorMs) / (7 * 86400000)) + 1);
+
+        meta.careersBySeason = meta.careersBySeason || {};
+        const stored = meta.careersBySeason[seasonId] || { history: [] };
+        const history = toArray(stored.history);
+        let dirty = false;
+
+        for (let r = history.length + 1; r <= Math.max(1, dueRounds); r++) {
+          const roundAtMs = firstAnchorMs + (r - 1) * 7 * 86400000;
+          const roundAtIso = new Date(Math.min(nowMs, roundAtMs)).toISOString();
+          const roundDay = shiftDateKey(sObj.start, r * 7);
+          const recsUpToRound = toArray(records).filter(x => x && x.done && !x.deleted && x.date >= sObj.start && x.date <= roundDay);
+
+          const areaWeights = { vitality: 0, agility: 0, intelligence: 0, willpower: 0, charisma: 0 };
+          for (const rec of recsUpToRound) {
+            if (['strength', 'sleep', 'protein', 'supplements'].includes(rec.activityId)) areaWeights.vitality += rec.xp || 10;
+            else if (['steps', 'cardio', 'shuffle', 'hiking', 'marathon'].includes(rec.activityId)) areaWeights.agility += rec.xp || 10;
+            else if (['english', 'blog', 'reading'].includes(rec.activityId)) areaWeights.intelligence += rec.xp || 10;
+            else if (['smalltalk', 'eyecontact', 'budget', 'repayment'].includes(rec.activityId)) areaWeights.charisma += rec.xp || 10;
+            else areaWeights.willpower += rec.xp || 10;
+          }
+
+          const ranked = STAT_KEYS
+            .map(k => [k, (Number(stats[k]) || 0) * 100 + (areaWeights[k] || 0)])
+            .sort((a, b) => b[1] - a[1]);
+          const topStat = ranked[0]?.[0] || 'willpower';
+          const pool = JOB_CATALOG[topStat] || JOB_CATALOG.willpower;
+          const chosen = pool[(r - 1) % pool.length];
+
+          history.push({
+            round: r,
+            at: roundAtIso,
+            job: chosen,
+            appearance: chosen.appearance
+          });
+          dirty = true;
+        }
+
+        if (dirty && persistIfChanged) {
+          meta.careersBySeason[seasonId] = { history, updatedAt: new Date().toISOString() };
+          cachedMeta = meta;
+          try { await writeFb('meta', meta); } catch (_) {}
+        }
+
+        const current = history[history.length - 1] || null;
+        const nextRound = history.length + 1;
+        const next = nextRound <= 12
+          ? { round: nextRound, at: new Date(firstAnchorMs + (nextRound - 1) * 7 * 86400000).toISOString() }
+          : null;
+
         return {
           ok: true,
           season: seasonId,
-          beta: seasonId === 'TEST',
+          beta: false,
           current,
-          history: [current],
-          next: null,
+          history,
+          next,
           seasons: allSeasonsUpToToday()
         };
       }
@@ -605,10 +720,9 @@
 
         const action = req && req.action;
 
-        // 새로고침 클릭 또는 빈 캐시일 때 Firebase 최신 데이터를 다시 조회
         if (action === 'read' && initialReadDone) {
           const [freshFb, freshMeta] = await Promise.all([fetchFbClient(), fetchFbMeta()]);
-          if (freshFb && freshFb.records.length) cachedClient = freshFb;
+          if (freshFb) cachedClient = freshFb;
           if (freshMeta) cachedMeta = freshMeta;
         }
 
@@ -618,18 +732,14 @@
         if (!client || !Array.isArray(client.records) || !client.records.length) {
           try {
             const getRes = await fetch(GAS_URL + '?action=read', { cache: 'no-store' }).then(r => (r.ok ? r.json() : null)).catch(() => null);
-            const normGet = normalizeClient(getRes);
-            if (normGet && normGet.records.length) {
-              client = normGet;
+            if (getRes && getRes.ok && Array.isArray(getRes.records)) {
+              client = normalizeClient(getRes);
               cachedClient = client;
-              await writeFb('client', client);
             } else {
               const sheetData = await bridgeCall({ action: 'syncAndRead' });
-              const normBridge = normalizeClient(sheetData);
-              if (normBridge && normBridge.records.length) {
-                client = normBridge;
+              if (sheetData && sheetData.ok && Array.isArray(sheetData.records)) {
+                client = normalizeClient(sheetData);
                 cachedClient = client;
-                await writeFb('client', client);
               }
             }
           } catch (_) {}
@@ -646,25 +756,22 @@
             const beforeSig = clientRecordSignature(client);
             bridgeCall({ action: 'syncAndRead' })
               .then(async fresh => {
-                if (fresh && Array.isArray(fresh.records)) {
-                  saveSyncedAutoCache(fresh.records);
-                }
+                if (!fresh || !fresh.ok || !Array.isArray(fresh.records)) return;
                 const norm = normalizeClient(fresh);
-                if (norm && norm.records.length) {
-                  const afterSig = clientRecordSignature(norm);
-                  cachedClient = norm;
-                  await writeFb('client', norm);
-                  // 시트에서 새로운 자동체크 활동이 추가되어 완료 목록이 실제로 달라졌을 때만 화면 갱신
-                  if (afterSig !== beforeSig && Date.now() - lastManualSetAt > 5000) {
-                    try {
-                      appFrame.contentWindow.document.getElementById('refreshCloud')?.click();
-                    } catch (_) {}
-                  }
+                const afterSig = clientRecordSignature(norm);
+                cachedClient = norm;
+                if (!fresh.firebaseUploaded) {
+                  try { await writeFb('client', norm); } catch (_) {}
+                }
+                if (afterSig !== beforeSig && Date.now() - lastManualSetAt > 5000) {
+                  try {
+                    appFrame.contentWindow.document.getElementById('refreshCloud')?.click();
+                  } catch (_) {}
                 }
               })
               .catch(() => {});
           }
-          const career = buildCareerForSeason(activeSeason.id, client.records, meta);
+          const career = await buildCareerForSeason(activeSeason.id, client.records, meta, false);
           return {
             ok: true,
             records: client.records,
@@ -675,57 +782,74 @@
           };
         }
 
+        // 원자적 수동 체크/취소(action === 'set'):
+        // 1) 서버 브리지(lifeQuestBridgeRequest)를 먼저 호출해 expectedVersion 충돌 검증, 시트 기록 및 Tasks 반영 결과를 확인
+        // 2) 서버가 확정한 최신 레코드만 로컬 상태 및 Firebase에 반영하며, 실패 시 에러를 그대로 반환해 app.html SaveQueue가 재시도하도록 보장
         if (action === 'set') {
           const date = String(req.date || today);
           const activityId = String(req.activityId || '');
           const done = req.done === true;
-          const xp = done ? (ACTIVITIES_XP[activityId] || 0) : 0;
-          const sId = seasonForDate(date).id;
-          const recId = `${sId}|${date}|${activityId}`;
-
-          const idx = client.records.findIndex(r => r.date === date && r.activityId === activityId);
-          const oldVer = idx >= 0 ? (client.records[idx].version || 0) : 0;
-          const newRec = {
-            recordId: recId,
-            seasonId: sId,
-            date,
-            activityId,
-            done,
-            xp,
-            version: Math.max(oldVer, Number(req.expectedVersion) || 0) + 1,
-            deleted: false
-          };
+          const expectedVersion = Number.isInteger(req.expectedVersion) ? req.expectedVersion : 0;
 
           lastManualSetAt = Date.now();
-          saveManualOverride(newRec);
-
-          if (idx >= 0) client.records[idx] = newRec;
-          else client.records.push(newRec);
-
-          cachedClient = normalizeClient(client) || client;
-          if (cachedClient.records.length > 5) {
-            await writeFb('client', cachedClient);
+          let res;
+          try {
+            res = await bridgeCall({
+              action: 'set',
+              date,
+              activityId,
+              done,
+              expectedVersion
+            });
+          } catch (err) {
+            return {
+              ok: false,
+              error: err && err.code ? err.code : 'CONNECTION_FAILED',
+              timing: { totalMs: Date.now() - started }
+            };
           }
-          syncRecoveryHabitToGrowthDashboard(activityId, cachedClient.records);
 
-          bridgeCall({ action: 'set', date, activityId, done, expectedVersion: newRec.version - 1 })
-            .then(res => {
-              if (res && res.adventures && cachedClient.sync) {
-                cachedClient.sync.adventure = res.adventures;
-              }
-            })
-            .catch(() => {});
+          if (!res || !res.ok) {
+            if (res && res.record && client && Array.isArray(client.records)) {
+              const cIdx = client.records.findIndex(r => r.date === res.record.date && r.activityId === res.record.activityId);
+              if (cIdx >= 0) client.records[cIdx] = res.record;
+              else client.records.push(res.record);
+              cachedClient = normalizeClient(client);
+            }
+            return {
+              ok: false,
+              error: (res && res.error) || 'SYNC_ERROR',
+              record: res ? res.record : undefined,
+              timing: { totalMs: Date.now() - started }
+            };
+          }
+
+          const confirmedRec = res.record;
+          const idx = client.records.findIndex(r => r.date === date && r.activityId === activityId);
+          if (idx >= 0) client.records[idx] = confirmedRec;
+          else client.records.push(confirmedRec);
+
+          if (res.adventures && client.sync) {
+            client.sync.adventure = res.adventures;
+          }
+          cachedClient = normalizeClient(client);
+
+          if (!res.firebaseUploaded) {
+            try { await writeFb('client', cachedClient); } catch (_) {}
+          }
+          void syncRecoveryHabitToGrowthDashboard(activityId, cachedClient.records);
 
           return {
             ok: true,
-            record: newRec,
-            taskSyncPending: false,
-            adventures: cachedClient.sync?.adventure || null,
+            record: confirmedRec,
+            taskSyncPending: Boolean(res.taskSyncPending),
+            adventures: res.adventures || cachedClient.sync?.adventure || null,
             timing: { totalMs: Date.now() - started }
           };
         }
 
         if (action === 'stats-read') {
+          meta = await fetchFbMeta();
           const alloc = meta.statsBySeason?.[activeSeason.id] || { values: { ...ZERO_STATS }, revision: 0 };
           const skillSpent = meta.skillsBySeason?.[activeSeason.id]?.state?.spentPoints || 0;
           return { ok: true, allocation: alloc, skillSpent, timing: { totalMs: Date.now() - started } };
@@ -733,23 +857,64 @@
 
         if (action === 'stats-save') {
           const sId = req.season || activeSeason.id;
-          const nextRev = (Number(req.expectedRevision) || 0) + 1;
-          meta.statsBySeason[sId] = { values: { ...ZERO_STATS, ...(req.values || {}) }, revision: nextRev };
+          if (sId !== activeSeason.id) {
+            return { ok: false, error: 'SEASON_READ_ONLY', timing: { totalMs: Date.now() - started } };
+          }
+          meta = await fetchFbMeta();
+          const currentAlloc = meta.statsBySeason?.[sId] || { values: { ...ZERO_STATS }, revision: 0 };
+          if (!Number.isInteger(req.expectedRevision) || req.expectedRevision !== (currentAlloc.revision || 0)) {
+            return { ok: false, error: 'STAT_CONFLICT', timing: { totalMs: Date.now() - started } };
+          }
+
+          const nextValues = { ...ZERO_STATS };
+          for (const k of STAT_KEYS) {
+            const v = req.values?.[k];
+            if (!Number.isSafeInteger(v) || v < 0) {
+              return { ok: false, error: 'INVALID_STATS', timing: { totalMs: Date.now() - started } };
+            }
+            nextValues[k] = v;
+          }
+
+          const sObj = allSeasonsUpToToday().find(s => s.id === sId) || activeSeason;
+          const xp = client.records.reduce((sum, r) => sum + (r.done && !r.deleted && r.settled !== false && r.date >= sObj.start && r.date <= sObj.end ? r.xp : 0), 0);
+          const earned = client.growthFloors.find(g => g.seasonId === sId)?.points ?? (Math.floor(xp / 100) * 3);
+          const allocated = STAT_KEYS.reduce((sum, k) => sum + nextValues[k], 0);
+          const skillSpent = meta.skillsBySeason?.[sId]?.state?.spentPoints || 0;
+
+          if (allocated + skillSpent > earned) {
+            return { ok: false, error: 'POINT_BUDGET', timing: { totalMs: Date.now() - started } };
+          }
+
+          const nextRev = (currentAlloc.revision || 0) + 1;
+          meta.statsBySeason[sId] = { values: nextValues, revision: nextRev };
           cachedMeta = meta;
           await writeFb('meta', meta);
-          bridgeCall({ action: 'adventure-stats', adventureStats: { season: sId, revision: nextRev, values: meta.statsBySeason[sId].values } }).catch(() => {});
-          const skillSpent = meta.skillsBySeason?.[sId]?.state?.spentPoints || 0;
-          return { ok: true, allocation: meta.statsBySeason[sId], skillSpent, adventureSyncPending: false, timing: { totalMs: Date.now() - started } };
+
+          let adventureSyncPending = false;
+          try {
+            await bridgeCall({ action: 'adventure-stats', adventureStats: { season: sId, revision: nextRev, values: nextValues } });
+          } catch (_) {
+            adventureSyncPending = true;
+          }
+
+          return {
+            ok: true,
+            allocation: meta.statsBySeason[sId],
+            skillSpent,
+            adventureSyncPending,
+            timing: { totalMs: Date.now() - started }
+          };
         }
 
         if (action === 'skills-read') {
+          meta = await fetchFbMeta();
           const sId = req.season || activeSeason.id;
           const sObj = allSeasonsUpToToday().find(s => s.id === sId) || activeSeason;
           const skillEntry = meta.skillsBySeason?.[sId] || { state: { schema: 1, learned: [], legends: [], ultimate: null, spentPoints: 0 }, revision: 0 };
           const xp = client.records.reduce((sum, r) => sum + (r.done && !r.deleted && r.settled !== false && r.date >= sObj.start && r.date <= sObj.end ? r.xp : 0), 0);
           const level = Math.floor(xp / 100) + 1;
           const stats = meta.statsBySeason?.[sId]?.values || ZERO_STATS;
-          const earned = client.growthFloors.find(g => g.seasonId === sId)?.points || Math.floor(xp / 100) * 3;
+          const earned = client.growthFloors.find(g => g.seasonId === sId)?.points ?? (Math.floor(xp / 100) * 3);
           const allocated = Object.values(stats).reduce((a, b) => a + Number(b || 0), 0);
           const spent = skillEntry.state.spentPoints || 0;
           return {
@@ -765,36 +930,50 @@
 
         if (['skills-learn', 'skills-fuse', 'skills-ultimate'].includes(action)) {
           const sId = req.season || activeSeason.id;
+          if (sId !== activeSeason.id) {
+            return { ok: false, error: 'SEASON_READ_ONLY', timing: { totalMs: Date.now() - started } };
+          }
+          meta = await fetchFbMeta();
           const sObj = allSeasonsUpToToday().find(s => s.id === sId) || activeSeason;
           const skillEntry = meta.skillsBySeason?.[sId] || { state: { schema: 1, learned: [], legends: [], ultimate: null, spentPoints: 0 }, revision: 0 };
+
+          if (!Number.isInteger(req.expectedRevision) || req.expectedRevision !== (skillEntry.revision || 0)) {
+            return { ok: false, error: 'SKILL_CONFLICT', timing: { totalMs: Date.now() - started } };
+          }
+
           const xp = client.records.reduce((sum, r) => sum + (r.done && !r.deleted && r.settled !== false && r.date >= sObj.start && r.date <= sObj.end ? r.xp : 0), 0);
           const level = Math.floor(xp / 100) + 1;
           const stats = meta.statsBySeason?.[sId]?.values || ZERO_STATS;
-          const cost = Number(req.expectedCost) || 2;
-          const at = new Date().toISOString();
-
-          if (action === 'skills-learn' && !skillEntry.state.learned.some(x => x.id === req.skillId)) {
-            skillEntry.state.learned.push({ id: req.skillId, at, level, stats: { ...stats } });
-            skillEntry.state.spentPoints = (skillEntry.state.spentPoints || 0) + cost;
-          } else if (action === 'skills-fuse') {
-            const ing = toArray(req.ingredients);
-            skillEntry.state.legends.push({ id: 'legend:' + ing.join('+'), kind: 'legend', name: '합성 전설 비전', description: '세 분기 비전이 결합된 전설 기술.', ingredients: ing, at, level, order: skillEntry.state.legends.length + 1 });
-            skillEntry.state.spentPoints = (skillEntry.state.spentPoints || 0) + cost;
-          } else if (action === 'skills-ultimate') {
-            skillEntry.state.ultimate = { id: 'ultimate:vision', kind: 'ultimate', name: '궁극의 왕립 비전', description: '세 전설이 하나로 완성된 궁극 기술.', ingredients: skillEntry.state.legends.map(l => l.id), at, level };
-            skillEntry.state.spentPoints = (skillEntry.state.spentPoints || 0) + cost;
-          }
-          skillEntry.revision = (skillEntry.revision || 0) + 1;
-          meta.skillsBySeason[sId] = skillEntry;
-          cachedMeta = meta;
-          await writeFb('meta', meta);
-
-          const earned = client.growthFloors.find(g => g.seasonId === sId)?.points || Math.floor(xp / 100) * 3;
+          const earned = client.growthFloors.find(g => g.seasonId === sId)?.points ?? (Math.floor(xp / 100) * 3);
           const allocated = Object.values(stats).reduce((a, b) => a + Number(b || 0), 0);
+          const beforeSpent = Number(skillEntry.state.spentPoints) || 0;
+          const remaining = Math.max(0, earned - allocated - beforeSpent);
+
+          let transitioned;
+          try {
+            transitioned = skillTransition(skillEntry.state, req, { level, stats, at: new Date().toISOString() });
+          } catch (err) {
+            return { ok: false, error: String(err.message || err), timing: { totalMs: Date.now() - started } };
+          }
+
+          if (!transitioned.unchanged) {
+            if (Number(req.expectedCost) !== transitioned.cost) {
+              return { ok: false, error: 'SKILL_COST_CHANGED', timing: { totalMs: Date.now() - started } };
+            }
+            if (transitioned.cost > remaining) {
+              return { ok: false, error: 'SKILL_POINTS', timing: { totalMs: Date.now() - started } };
+            }
+            skillEntry.state = transitioned.state;
+            skillEntry.revision = (skillEntry.revision || 0) + 1;
+            meta.skillsBySeason[sId] = skillEntry;
+            cachedMeta = meta;
+            await writeFb('meta', meta);
+          }
+
           return {
             ok: true,
             state: skillEntry.state,
-            revision: skillEntry.revision,
+            revision: skillEntry.revision || 0,
             remaining: Math.max(0, earned - allocated - (skillEntry.state.spentPoints || 0)),
             timing: { totalMs: Date.now() - started }
           };
@@ -803,9 +982,9 @@
         if (action === 'adventures-read') {
           const sId = req.season || activeSeason.id;
           let adv = client.adventuresBySeason?.[sId];
-          if (!adv) {
+          if (!adv || req.before) {
             const res = await bridgeCall({ action: 'adventures-read', season: sId, before: req.before }).catch(() => null);
-            adv = res?.adventures || { enabled: true, season: sId, xp: 0, consumed: 0, baseline: 0, progress: 0, nextXp: 100, gold: 0, count: 0, lastError: '', entries: [], nextBefore: null };
+            adv = res?.adventures || adv || { enabled: true, season: sId, xp: 0, consumed: 0, baseline: 0, progress: 0, nextXp: 100, gold: 0, count: 0, lastError: '', entries: [], nextBefore: null };
           }
           return { ok: true, adventures: adv, timing: { totalMs: Date.now() - started } };
         }
@@ -814,7 +993,7 @@
           const sId = req.seasonId || activeSeason.id;
           const seasons = allSeasonsUpToToday();
           const season = seasons.find(s => s.id === sId) || activeSeason;
-          const sRecords = client.records.filter(r => r.date >= season.start && r.date <= season.end);
+          const sRecords = client.records.filter(r => r.date >= season.start && r.date <= season.end && !r.deleted);
           return { ok: true, season, seasons, records: sRecords, activities: ACTIVITIES_CATALOG, timing: { totalMs: Date.now() - started } };
         }
 
@@ -829,10 +1008,12 @@
         }
 
         if (action === 'rewards-read') {
+          meta = await fetchFbMeta();
           return { ok: true, rewards: meta.rewards || [], timing: { totalMs: Date.now() - started } };
         }
 
         if (action === 'reward-claim') {
+          meta = await fetchFbMeta();
           const sId = req.season || activeSeason.id;
           const rewardId = `${sId}:${req.questId}:${req.stage}`;
           let reward = (meta.rewards || []).find(r => r.reward_id === rewardId);
@@ -840,7 +1021,7 @@
             const sRecs = client.records.filter(r => r.done && !r.deleted && r.settled !== false && r.date >= activeSeason.start && r.date <= today);
             const xp = sRecs.reduce((sum, r) => sum + r.xp, 0);
             const count = sRecs.filter(r => r.activityId === req.questId).reduce((sum, r) => sum + (req.questId === 'reading' ? (r.sourceCount || 1) : 1), 0);
-            const career = buildCareerForSeason(sId, client.records, meta);
+            const career = await buildCareerForSeason(sId, client.records, meta, false);
             reward = {
               reward_id: rewardId,
               quest_id: req.questId,
@@ -857,15 +1038,18 @@
         }
 
         if (action === 'careers-read') {
+          meta = await fetchFbMeta();
           const sId = req.season || activeSeason.id;
-          return { ...buildCareerForSeason(sId, client.records, meta), timing: { totalMs: Date.now() - started } };
+          const careerData = await buildCareerForSeason(sId, client.records, meta, true);
+          return { ...careerData, timing: { totalMs: Date.now() - started } };
         }
 
         if (action === 'profile-read') {
+          meta = await fetchFbMeta();
           const sRecs = client.records.filter(r => r.done && !r.deleted && r.settled !== false && r.date >= activeSeason.start && r.date <= today);
           const activeDaysSet = new Set(sRecs.map(r => r.date));
           const seasonRewards = (meta.rewards || []).filter(r => r.season === activeSeason.id);
-          const career = buildCareerForSeason(activeSeason.id, client.records, meta);
+          const career = await buildCareerForSeason(activeSeason.id, client.records, meta, true);
 
           const achievements = [
             { id: 'first', icon: '🌱', name: '첫 발자국', description: '이번 시즌 첫 활동 완료', title: '첫 기록의 목격자', count: sRecs.length, target: 1, unit: '건', unlocked: sRecs.length >= 1 },
