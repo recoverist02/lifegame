@@ -751,25 +751,30 @@
 
         if (action === 'read') {
           initialReadDone = true;
-          if (Date.now() - lastBackgroundSyncAt > 25000) {
+          if (Date.now() - lastBackgroundSyncAt > 45000 && Date.now() - lastManualSetAt > 8000) {
             lastBackgroundSyncAt = Date.now();
             const beforeSig = clientRecordSignature(client);
-            bridgeCall({ action: 'syncAndRead' })
-              .then(async fresh => {
-                if (!fresh || !fresh.ok || !Array.isArray(fresh.records)) return;
-                const norm = normalizeClient(fresh);
-                const afterSig = clientRecordSignature(norm);
-                cachedClient = norm;
-                if (!fresh.firebaseUploaded) {
-                  try { await writeFb('client', norm); } catch (_) {}
-                }
-                if (afterSig !== beforeSig && Date.now() - lastManualSetAt > 5000) {
-                  try {
-                    appFrame.contentWindow.document.getElementById('refreshCloud')?.click();
-                  } catch (_) {}
-                }
-              })
-              .catch(() => {});
+            const lastSyncMs = Date.parse(client?.sync?.lastSuccess || '') || 0;
+            const needFullAutoSync = !lastSyncMs || (Date.now() - lastSyncMs > 10 * 60 * 1000);
+            setTimeout(() => {
+              if (Date.now() - lastManualSetAt < 8000) return;
+              bridgeCall({ action: needFullAutoSync ? 'syncAndRead' : 'read' })
+                .then(async fresh => {
+                  if (!fresh || !fresh.ok || !Array.isArray(fresh.records)) return;
+                  const norm = normalizeClient(fresh);
+                  const afterSig = clientRecordSignature(norm);
+                  cachedClient = norm;
+                  if (!fresh.firebaseUploaded) {
+                    try { await writeFb('client', norm); } catch (_) {}
+                  }
+                  if (afterSig !== beforeSig && Date.now() - lastManualSetAt > 8000) {
+                    try {
+                      appFrame.contentWindow.document.getElementById('refreshCloud')?.click();
+                    } catch (_) {}
+                  }
+                })
+                .catch(() => {});
+            }, 3500);
           }
           const career = await buildCareerForSeason(activeSeason.id, client.records, meta, false);
           return {
