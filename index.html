@@ -96,6 +96,12 @@
         return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Seoul', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
       }
 
+      function shiftDateKey(key, days) {
+        const d = new Date(key + 'T00:00:00Z');
+        d.setUTCDate(d.getUTCDate() + days);
+        return d.toISOString().slice(0, 10);
+      }
+
       function seasonForDate(date) {
         if (date < '2026-11-01') return { id: 'TEST', number: 0, name: '베타테스트', start: '2026-01-01', end: '2026-10-31' };
         const [y, m] = date.split('-').map(Number);
@@ -129,18 +135,42 @@
         return list;
       }
 
-      const ACTIVITIES_XP = {
-        steps: 6, protein: 4, supplements: 4, strength: 20, sleep: 12, cardio: 22,
-        english: 8, blog: 60, reading: 80, budget: 18, repayment: 200,
-        smalltalk: 6, eyecontact: 6, bedtime: 6, sobriety: 8, 'gambling-free': 8,
-        moderation: 8, meditation: 6, journal: 18, ga: 25, shuffle: 60, hiking: 250, marathon: 300
-      };
+      const ACTIVITIES_CATALOG = [
+        { id: 'steps', name: '1만 보 걷기', area: '건강', xp: 6 },
+        { id: 'protein', name: '단백질 위주 식단', area: '건강', xp: 4 },
+        { id: 'supplements', name: '영양제', area: '건강', xp: 4 },
+        { id: 'strength', name: '근력 운동', area: '건강', xp: 20 },
+        { id: 'sleep', name: '수면 7시간 이상', area: '건강', xp: 12 },
+        { id: 'cardio', name: '유산소 운동', area: '건강', xp: 22 },
+        { id: 'english', name: '영어대화 5분', area: '학습', xp: 8 },
+        { id: 'blog', name: '블로그 글쓰기', area: '학습', xp: 60 },
+        { id: 'reading', name: '독서 1권', area: '학습', xp: 80 },
+        { id: 'budget', name: '가계부 쓰기', area: '재정', xp: 18 },
+        { id: 'repayment', name: '변제금 납부', area: '재정', xp: 200 },
+        { id: 'smalltalk', name: '스몰톡하기', area: '관계', xp: 6 },
+        { id: 'eyecontact', name: '아이컨택', area: '관계', xp: 6 },
+        { id: 'bedtime', name: '24시 취침', area: '규율', xp: 6 },
+        { id: 'sobriety', name: '금주하기', area: '규율', xp: 8 },
+        { id: 'gambling-free', name: '단도박 유지', area: '규율', xp: 8 },
+        { id: 'moderation', name: '절제하기', area: '규율', xp: 8 },
+        { id: 'meditation', name: '5분 명상하기', area: '성찰', xp: 6 },
+        { id: 'journal', name: '일기쓰기', area: '성찰', xp: 18 },
+        { id: 'ga', name: 'GA 참석', area: '성찰', xp: 25 },
+        { id: 'shuffle', name: '셔플댄스 연습', area: '도전', xp: 60 },
+        { id: 'hiking', name: '등산', area: '도전', xp: 250 },
+        { id: 'marathon', name: '마라톤', area: '도전', xp: 300 }
+      ];
 
+      const ACTIVITIES_XP = Object.fromEntries(ACTIVITIES_CATALOG.map(a => [a.id, a.xp]));
       const ZERO_STATS = { vitality: 0, agility: 0, intelligence: 0, willpower: 0, charisma: 0 };
 
       function normalizeClient(raw) {
         if (!raw || typeof raw !== 'object') return null;
+        const nowMs = Date.now();
+        const today = todayKst();
+        const yesterday = shiftDateKey(today, -1);
         const map = new Map();
+
         for (const r of toArray(raw.records)) {
           if (!r || !/^\d{4}-\d{2}-\d{2}$/.test(String(r.date || '')) || !r.activityId) continue;
           const date = String(r.date);
@@ -148,28 +178,61 @@
           const sId = seasonForDate(date).id;
           const key = `${sId}|${date}|${activityId}`;
           const done = r.done === true;
-          const xp = Number.isSafeInteger(Number(r.xp)) && Number(r.xp) >= 0 ? Number(r.xp) : 0;
+          let xp = Number.isSafeInteger(Number(r.xp)) && Number(r.xp) >= 0 ? Number(r.xp) : 0;
           const version = Number.isInteger(Number(r.version)) && Number(r.version) >= 0 ? Number(r.version) : 1;
           const isReading = r.source === 'READING_SHEET' || activityId === 'reading';
           const sourceCount = isReading
             ? (done ? Math.max(1, Math.floor(Number(r.sourceCount) || 1)) : 0)
             : (Number(r.sourceCount) || (done ? 1 : 0));
 
+          const AUTO_IDS = new Set(['steps', 'sleep', 'bedtime', 'strength', 'cardio', 'ga', 'reading', 'journal']);
+          const HEALTH_IDS = new Set(['steps', 'sleep', 'bedtime']);
+          const isAuto = Boolean(r.source) || AUTO_IDS.has(activityId);
+          const isHealth = r.source === 'HEALTH_SHEET' || HEALTH_IDS.has(activityId);
+          const collectsAt = shiftDateKey(date, 1) + 'T11:00:00+09:00';
+          const settlesAt = r.settlesAt || (shiftDateKey(date, 1) + 'T12:00:00+09:00');
+
+          let finalDone = done;
+          let finalCollected = isHealth ? !!r.collected : true;
+          let finalSourceValue = r.sourceValue ?? null;
+          let settled = typeof r.settled === 'boolean' ? r.settled : true;
+
+          if (isHealth && nowMs < Date.parse(collectsAt)) {
+            // 다음날 오전 11시 이전에는 건강데이터 수집·체크·확정 모두 대기
+            finalDone = false;
+            finalCollected = false;
+            finalSourceValue = null;
+            settled = false;
+            xp = 0;
+          } else if (isAuto && nowMs < Date.parse(settlesAt)) {
+            // 다음날 낮 12시 이전에는 모든 자동활동 확정 및 XP 지급 엄격 차단
+            settled = false;
+            xp = 0;
+          } else if (isAuto && finalDone && !settled && nowMs >= Date.parse(settlesAt)) {
+            // 다음날 낮 12시 이후(건강데이터는 수집 완료된 경우)에만 확정
+            if (!isHealth || finalCollected) {
+              settled = true;
+              if (xp === 0) {
+                xp = (isReading ? Math.max(1, sourceCount) : 1) * (ACTIVITIES_XP[activityId] || 0);
+              }
+            }
+          }
+
           const item = {
             recordId: key,
             seasonId: sId,
             date,
             activityId,
-            done,
+            done: finalDone,
             xp,
             version,
             deleted: r.deleted === true,
-            ...(r.source ? {
-              source: r.source,
-              settled: typeof r.settled === 'boolean' ? r.settled : true,
-              sourceCount,
-              ...(r.source === 'HEALTH_SHEET' ? { sourceValue: r.sourceValue ?? null, collected: !!r.collected } : {}),
-              ...(r.settlesAt ? { settlesAt: r.settlesAt } : {})
+            ...(isAuto ? {
+              source: r.source || (isHealth ? 'HEALTH_SHEET' : isReading ? 'READING_SHEET' : activityId === 'journal' ? 'JOURNAL_SHEET' : activityId === 'ga' ? 'GA_SHEET' : 'WORKOUT_SHEET'),
+              settled,
+              sourceCount: finalDone ? sourceCount : (isHealth && finalCollected ? 1 : 0),
+              ...(isHealth ? { sourceValue: finalSourceValue, collected: finalCollected } : {}),
+              settlesAt
             } : {})
           };
 
@@ -179,12 +242,35 @@
           }
         }
 
-        const growthFloors = toArray(raw.growthFloors).map(g => ({
-          seasonId: String(g.seasonId || 'S001'),
-          points: Number(g.points) || 0,
-          through: String(g.through || ''),
-          settledAt: String(g.settledAt || '')
-        }));
+        const recordsList = [...map.values()];
+
+        // 시즌별 획득 포인트(growthFloors) 자동 계산 및 보정 (연동상태 시트 삭제 시에도 포인트 정상 표시)
+        const floorMap = new Map();
+        for (const g of toArray(raw.growthFloors)) {
+          const sId = String(g.seasonId || 'S001');
+          floorMap.set(sId, {
+            seasonId: sId,
+            points: Number(g.points) || 0,
+            through: String(g.through || yesterday),
+            settledAt: String(g.settledAt || new Date().toISOString())
+          });
+        }
+
+        for (const s of allSeasonsUpToToday()) {
+          const settledXp = recordsList.reduce((sum, r) => {
+            if (r.seasonId !== s.id || !r.done || r.deleted || r.settled === false) return sum;
+            if (s.id !== 'TEST' && r.date > yesterday) return sum;
+            return sum + (Number(r.xp) || 0);
+          }, 0);
+          const calcPoints = Math.floor(settledXp / 100) * 3;
+          const prev = floorMap.get(s.id);
+          floorMap.set(s.id, {
+            seasonId: s.id,
+            points: Math.max(prev ? prev.points : 0, calcPoints),
+            through: prev && prev.through ? prev.through : (s.id === 'TEST' ? '2026-10-31' : yesterday),
+            settledAt: prev && prev.settledAt ? prev.settledAt : new Date().toISOString()
+          });
+        }
 
         const adventuresBySeason = raw.adventuresBySeason && typeof raw.adventuresBySeason === 'object' ? raw.adventuresBySeason : {};
         for (const [k, v] of Object.entries(adventuresBySeason)) {
@@ -194,8 +280,8 @@
         return {
           ...raw,
           ok: true,
-          records: [...map.values()],
-          growthFloors,
+          records: recordsList,
+          growthFloors: [...floorMap.values()],
           adventuresBySeason,
           sync: raw.sync || {}
         };
@@ -222,27 +308,40 @@
       let cachedClient = null;
       let cachedMeta = null;
       let lastBackgroundSyncAt = 0;
+      let initialReadDone = false;
+
+      async function fetchFbClient() {
+        try {
+          const r = await fetch(`${cleanFbUrl}/lifequest/client.json`, { cache: 'no-store' });
+          if (!r.ok) return null;
+          const d = await r.json();
+          const norm = normalizeClient(d);
+          if (norm && norm.records.length) {
+            cachedClient = norm;
+            return norm;
+          }
+        } catch (_) {}
+        return null;
+      }
+
+      async function fetchFbMeta() {
+        try {
+          const r = await fetch(`${cleanFbUrl}/lifequest/meta.json`, { cache: 'no-store' });
+          const d = r.ok ? await r.json() : null;
+          cachedMeta = normalizeMeta(d);
+          return cachedMeta;
+        } catch (_) {
+          cachedMeta = normalizeMeta(null);
+          return cachedMeta;
+        }
+      }
 
       const prefetchShellPromise = fetch('./app.html')
         .then(r => (r.ok ? r.text() : null))
         .catch(() => null);
 
-      const prefetchClientPromise = fetch(`${cleanFbUrl}/lifequest/client.json`, { cache: 'no-store' })
-        .then(r => (r.ok ? r.json() : null))
-        .then(d => {
-          const norm = normalizeClient(d);
-          if (norm && norm.records.length) cachedClient = norm;
-          return cachedClient;
-        })
-        .catch(() => null);
-
-      const prefetchMetaPromise = fetch(`${cleanFbUrl}/lifequest/meta.json`, { cache: 'no-store' })
-        .then(r => (r.ok ? r.json() : null))
-        .then(d => {
-          cachedMeta = normalizeMeta(d);
-          return cachedMeta;
-        })
-        .catch(() => normalizeMeta(null));
+      const prefetchClientPromise = fetchFbClient();
+      const prefetchMetaPromise = fetchFbMeta();
 
       let bridgeSource = null;
       let resolveBridgeReady = null;
@@ -367,28 +466,59 @@
           return { ok: true, ...(meta.ai || { configured: false, month: today.slice(0, 7), used: 0, limit: 10, jobs: [] }) };
         }
 
+        const action = req && req.action;
+
+        // 새로고침 클릭 또는 빈 캐시일 때 Firebase 최신 데이터를 다시 조회
+        if (action === 'read' && initialReadDone) {
+          const [freshFb, freshMeta] = await Promise.all([fetchFbClient(), fetchFbMeta()]);
+          if (freshFb && freshFb.records.length) cachedClient = freshFb;
+          if (freshMeta) cachedMeta = freshMeta;
+        }
+
         let client = cachedClient || (await prefetchClientPromise);
         let meta = cachedMeta || (await prefetchMetaPromise);
 
-        if (!client || !Array.isArray(client.records)) {
+        if (!client || !Array.isArray(client.records) || !client.records.length) {
           try {
-            const sheetData = await bridgeCall({ action: 'syncAndRead' });
-            client = normalizeClient(sheetData) || { ok: true, records: [], growthFloors: [], adventuresBySeason: {}, sync: {} };
-          } catch (_) {
-            client = { ok: true, records: [], growthFloors: [], adventuresBySeason: {}, sync: {} };
+            const getRes = await fetch(GAS_URL + '?action=read', { cache: 'no-store' }).then(r => (r.ok ? r.json() : null)).catch(() => null);
+            const normGet = normalizeClient(getRes);
+            if (normGet && normGet.records.length) {
+              client = normGet;
+              cachedClient = client;
+              await writeFb('client', client);
+            } else {
+              const sheetData = await bridgeCall({ action: 'syncAndRead' });
+              const normBridge = normalizeClient(sheetData);
+              if (normBridge && normBridge.records.length) {
+                client = normBridge;
+                cachedClient = client;
+                await writeFb('client', client);
+              }
+            }
+          } catch (_) {}
+          if (!client || !Array.isArray(client.records)) {
+            client = normalizeClient({ ok: true, records: [], growthFloors: [], adventuresBySeason: {}, sync: {} });
           }
           cachedClient = client;
         }
 
-        const action = req && req.action;
-
         if (action === 'read') {
+          initialReadDone = true;
           if (Date.now() - lastBackgroundSyncAt > 20000) {
             lastBackgroundSyncAt = Date.now();
+            const prevCount = client.records.length;
+            const prevXp = client.records.reduce((s, r) => s + (r.done && !r.deleted && r.settled !== false ? r.xp : 0), 0);
             bridgeCall({ action: 'syncAndRead' })
               .then(fresh => {
                 const norm = normalizeClient(fresh);
-                if (norm && norm.records.length) cachedClient = norm;
+                if (norm && norm.records.length) {
+                  cachedClient = norm;
+                  writeFb('client', norm);
+                  const newXp = norm.records.reduce((s, r) => s + (r.done && !r.deleted && r.settled !== false ? r.xp : 0), 0);
+                  if (norm.records.length !== prevCount || newXp !== prevXp) {
+                    try { appFrame.contentWindow.document.getElementById('refreshCloud')?.click(); } catch (_) {}
+                  }
+                }
               })
               .catch(() => {});
           }
@@ -427,9 +557,11 @@
           if (idx >= 0) client.records[idx] = newRec;
           else client.records.push(newRec);
 
-          cachedClient = client;
-          await writeFb('client', client);
-          syncRecoveryHabitToGrowthDashboard(activityId, client.records);
+          cachedClient = normalizeClient(client) || client;
+          if (cachedClient.records.length > 5) {
+            await writeFb('client', cachedClient);
+          }
+          syncRecoveryHabitToGrowthDashboard(activityId, cachedClient.records);
 
           bridgeCall({ action: 'set', date, activityId, done, expectedVersion: newRec.version - 1 })
             .then(res => {
@@ -443,7 +575,7 @@
             ok: true,
             record: newRec,
             taskSyncPending: false,
-            adventures: client.sync?.adventure || null,
+            adventures: cachedClient.sync?.adventure || null,
             timing: { totalMs: Date.now() - started }
           };
         }
@@ -538,7 +670,7 @@
           const seasons = allSeasonsUpToToday();
           const season = seasons.find(s => s.id === sId) || activeSeason;
           const sRecords = client.records.filter(r => r.date >= season.start && r.date <= season.end);
-          return { ok: true, season, seasons, records: sRecords, activities: [], timing: { totalMs: Date.now() - started } };
+          return { ok: true, season, seasons, records: sRecords, activities: ACTIVITIES_CATALOG, timing: { totalMs: Date.now() - started } };
         }
 
         if (action === 'seasons-read') {
@@ -548,7 +680,7 @@
             return { season_id: s.id, records: sRecs.length, recorded_xp: sRecs.reduce((sum, r) => sum + r.xp, 0) };
           });
           const archivedStats = Object.entries(meta.statsBySeason || {}).map(([seasonId, v]) => ({ seasonId, values: v.values || ZERO_STATS }));
-          return { ok: true, seasons, summaries, archivedStats, activities: [], timing: { totalMs: Date.now() - started } };
+          return { ok: true, seasons, summaries, archivedStats, activities: ACTIVITIES_CATALOG, timing: { totalMs: Date.now() - started } };
         }
 
         if (action === 'rewards-read') {
@@ -631,7 +763,6 @@
         return { ok: true, timing: { totalMs: Date.now() - started } };
       };
 
-      // 깨진 이미지 없이 모험가 전신 일러스트와 배경을 그려주는 내장 SVG 데이터 URI
       const ADVENTURER_SVG = 'data:image/svg+xml;utf8,' + encodeURIComponent(
         '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 220">' +
         '<defs>' +
@@ -701,7 +832,6 @@
 
         const cfRe = new RegExp('<script>\\(function\\(\\)\\{function c\\(\\)[\\s\\S]*?<' + '/script>', 'gi');
 
-        // 중괄호를 건드리지 않고 안전하게 서비스워커 호출과 이미지 경로만 치환
         let cleaned = String(rawHtml || '')
           .replace(cfRe, '')
           .replace("navigator.serviceWorker.register('/sw.js'", "Promise.resolve('/sw.js'")
