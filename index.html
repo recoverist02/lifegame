@@ -167,7 +167,6 @@
         { id: 'marathon', name: '마라톤', area: '도전', xp: 300, criterion: '마라톤 대회 완주' }
       ];
 
-      const ACTIVITIES_XP = Object.fromEntries(ACTIVITIES_CATALOG.map(a => [a.id, a.xp]));
       const ZERO_STATS = { vitality: 0, agility: 0, intelligence: 0, willpower: 0, charisma: 0 };
       const STAT_KEYS = ['vitality', 'agility', 'intelligence', 'willpower', 'charisma'];
       let lastManualSetAt = 0;
@@ -315,6 +314,8 @@
       // - INITIAL_SHEET_SEED, 로컬 스냅샷, 자동활동 캐시, 수동 오버라이드 병합을 제거하고 서버 데이터(raw.records)만 신뢰
       // - prev.done && !item.done 강제 보호를 제거하고 오직 version 기준으로 최신 상태를 채택
       // - 브라우저가 임의로 settled=true 및 xp를 생성하지 않고 서버 정산값을 그대로 신뢰 (단, 정산 시각 이전 자동활동은 미정산 강제)
+      const VALID_ACTIVITY_IDS = new Set(ACTIVITIES_CATALOG.map(a => a.id));
+
       function normalizeClient(raw) {
         if (!raw || typeof raw !== 'object') raw = {};
         const nowMs = Date.now();
@@ -329,6 +330,7 @@
           const date = normalizeDateStr(r.date, r.recordId);
           if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) continue;
           const activityId = String(r.activityId);
+          if (!VALID_ACTIVITY_IDS.has(activityId)) continue;
           const sId = seasonForDate(date).id;
           const key = `${sId}|${date}|${activityId}`;
           const deleted = r.deleted === true;
@@ -370,10 +372,11 @@
             seasonId: sId,
             date,
             activityId,
-            done: finalDone,
+            done: Boolean(finalDone),
             xp: finalDone ? xp : 0,
             version,
-            deleted,
+            deleted: Boolean(deleted),
+            ...(r.taskSyncPending ? { taskSyncPending: true } : {}),
             ...(isAuto ? {
               source: r.source || (isHealth ? 'HEALTH_SHEET' : isReading ? 'READING_SHEET' : activityId === 'journal' ? 'JOURNAL_SHEET' : activityId === 'ga' ? 'GA_SHEET' : 'WORKOUT_SHEET'),
               settled,
@@ -458,91 +461,150 @@
         };
       }
 
-      let cachedClient = null;
-      let cachedMeta = null;
-      let lastBackgroundSyncAt = 0;
-      let initialReadDone = false;
+      const LOCAL_META_CACHE_KEY = 'lifequest.meta.v4';
+      const LOCAL_FB_AUTH_KEY = 'lifequest.firebase.auth';
+      const LOCAL_CLIENT_CACHE_KEY = 'lifequest.client.v4';
+      const APP_SNAPSHOT_KEY = 'lifequest.mvp.v2-confirmed-v1';
+      const APP_DAYS_KEY = 'lifequest.mvp.v2';
+      const APP_PENDING_KEY = 'lifequest.mvp.v2-pending-v1';
+      let fbPermissionDenied = false;
 
       function clientRecordSignature(c) {
         if (!c || !Array.isArray(c.records)) return '';
         return c.records
-          .map(r => `${r.recordId}:${r.done ? 1 : 0}:${r.deleted ? 1 : 0}:${r.xp}:${r.version}:${r.settled ? 1 : 0}`)
+          .map(r => `${r.recordId}:${r.done ? 1 : 0}:${r.deleted ? 1 : 0}:${r.xp}:${r.version}:${r.settled ? 1 : 0}:${r.collected ? 1 : 0}:${r.sourceValue ?? ''}:${r.sourceCount ?? 0}:${r.taskSyncPending ? 1 : 0}`)
           .sort()
           .join('|');
       }
 
-      // 조회(fetchFbClient) 중에는 절대 Firebase에 쓰기(writeFb)를 수행하지 않음!
-      async function fetchFbClient() {
-        try {
-          const r = await fetch(`${cleanFbUrl}/lifequest/client.json`, { cache: 'no-store' });
-          if (!r.ok) return cachedClient;
-          const d = await r.json();
-          if (!d || typeof d !== 'object') return cachedClient;
-          const norm = normalizeClient(d);
-          if (norm && norm.records.length) {
-            cachedClient = norm;
-            saveLocalClientCache(norm);
-            return norm;
+      // 두 스냅샷(기존 캐시 vs 신규 수신)을 항목별 version 및 updatedAt 기준으로 병합하여
+      // 새로고침 시 이전 스냅샷 때문에 자동체크(근력운동·일기쓰기 등)나 수동체크가 풀렸다가 다시 켜지는 현상을 원천 차단!
+      function mergeClientSnapshots(base, incoming) {
+        if (!base || !Array.isArray(base.records) || !base.records.length) return incoming;
+        if (!incoming || !Array.isArray(incoming.records) || !incoming.records.length) return base;
+        const baseTime = String(base.updatedAt || '');
+        const incTime = String(incoming.updatedAt || '');
+        const incIsNewer = !baseTime || (incTime && incTime >= baseTime);
+        const recMap = new Map();
+
+        for (const r of base.records) {
+          if (r && r.recordId) recMap.set(r.recordId, r);
+        }
+        for (const r of incoming.records) {
+          if (!r || !r.recordId) continue;
+          const prev = recMap.get(r.recordId);
+          if (!prev) {
+            recMap.set(r.recordId, r);
+            continue;
           }
-          return cachedClient;
-        } catch (_) {
-          return cachedClient;
+          const vNew = Number(r.version) || 0;
+          const vOld = Number(prev.version) || 0;
+          if (vNew > vOld) {
+            recMap.set(r.recordId, r);
+          } else if (vNew === vOld && incIsNewer) {
+            // 동일 버전일 때 이미 정산(settled)되었거나 수집(collected)된 정보는 강등하지 않음
+            if (prev.settled && !r.settled && r.done === prev.done) continue;
+            if (prev.collected && !r.collected) continue;
+            recMap.set(r.recordId, r);
+          }
         }
-      }
 
-      async function fetchFbMeta() {
-        try {
-          const r = await fetch(`${cleanFbUrl}/lifequest/meta.json`, { cache: 'no-store' });
-          if (!r.ok) return cachedMeta || normalizeMeta(null);
-          const d = await r.json();
-          cachedMeta = normalizeMeta(d);
-          return cachedMeta;
-        } catch (_) {
-          cachedMeta = cachedMeta || normalizeMeta(null);
-          return cachedMeta;
+        const primary = incIsNewer ? incoming : base;
+        const secondary = incIsNewer ? base : incoming;
+        const floorMap = new Map();
+        for (const g of [...toArray(secondary.growthFloors), ...toArray(primary.growthFloors)]) {
+          if (!g || !g.seasonId) continue;
+          const oldG = floorMap.get(g.seasonId);
+          floorMap.set(g.seasonId, {
+            seasonId: g.seasonId,
+            points: Math.max(oldG ? Number(oldG.points) || 0 : 0, Number(g.points) || 0),
+            through: String((oldG && oldG.through > g.through ? oldG.through : g.through) || ''),
+            settledAt: String(g.settledAt || (oldG && oldG.settledAt) || '')
+          });
         }
-      }
 
-      // HTTP 상태 코드 검증: 실패 시 예외를 발생시켜 호출자가 인지하도록 수정
-      async function writeFb(path, data) {
-        const cleanPath = String(path).replace(/^\/+/, '');
-        const res = await fetch(`${cleanFbUrl}/lifequest/${cleanPath}.json`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(data)
+        return normalizeClient({
+          ...secondary,
+          ...primary,
+          updatedAt: incIsNewer ? (incTime || baseTime) : baseTime,
+          records: [...recMap.values()],
+          growthFloors: [...floorMap.values()],
+          adventuresBySeason: Object.keys(primary.adventuresBySeason || {}).length ? primary.adventuresBySeason : (secondary.adventuresBySeason || {}),
+          sync: Object.keys(primary.sync || {}).length ? primary.sync : (secondary.sync || {})
         });
-        if (!res.ok) {
-          const err = new Error('FIREBASE_WRITE_FAILED_' + res.status);
-          err.code = 'CONNECTION_FAILED';
-          throw err;
-        }
-        return true;
       }
 
-      const LOCAL_CLIENT_CACHE_KEY = 'lifequest.client.v4';
-      const APP_SNAPSHOT_KEY = 'lifequest.mvp.v2-confirmed-v1';
+      function buildFbUrl(path) {
+        const cleanPath = String(path).replace(/^\/+/, '');
+        let token = '';
+        try {
+          token = String(window.LQ_FIREBASE_AUTH || localStorage.getItem(LOCAL_FB_AUTH_KEY) || '').trim();
+        } catch (_) {}
+        return `${cleanFbUrl}/lifequest/${cleanPath}.json` + (token ? `?auth=${encodeURIComponent(token)}` : '');
+      }
+
+      function saveLocalMetaCache(metaObj) {
+        if (!metaObj || typeof metaObj !== 'object') return;
+        try { localStorage.setItem(LOCAL_META_CACHE_KEY, JSON.stringify(metaObj)); } catch (_) {}
+      }
+
+      function loadLocalMetaCache() {
+        try {
+          const raw = JSON.parse(localStorage.getItem(LOCAL_META_CACHE_KEY) || 'null');
+          if (raw && typeof raw === 'object') return normalizeMeta(raw);
+        } catch (_) {}
+        return null;
+      }
 
       function saveLocalClientCache(clientObj) {
         if (!clientObj || !Array.isArray(clientObj.records) || !clientObj.records.length) return;
+        const validRecords = clientObj.records.filter(r =>
+          r && VALID_ACTIVITY_IDS.has(r.activityId) &&
+          /^\d{4}-\d{2}-\d{2}$/.test(r.date) &&
+          typeof r.done === 'boolean' &&
+          Number.isInteger(r.version) &&
+          r.version >= 0
+        );
+        if (!validRecords.length) return;
         try {
-          localStorage.setItem(LOCAL_CLIENT_CACHE_KEY, JSON.stringify(clientObj));
+          localStorage.setItem(LOCAL_CLIENT_CACHE_KEY, JSON.stringify({ ...clientObj, records: validRecords }));
         } catch (_) {}
         try {
           const existing = JSON.parse(localStorage.getItem(APP_SNAPSHOT_KEY) || 'null');
           localStorage.setItem(APP_SNAPSHOT_KEY, JSON.stringify({
             schema: 1,
-            records: clientObj.records,
+            records: validRecords,
             growthFloors: Array.isArray(clientObj.growthFloors) ? clientObj.growthFloors : (existing?.growthFloors || []),
             lastRecordSync: clientObj.updatedAt || existing?.lastRecordSync || new Date().toISOString()
           }));
         } catch (_) {}
+        // app.html의 첫 동기 렌더링(0ms)에서 체크 상태가 풀리지 않도록 STORAGE_KEY(lifequest.mvp.v2)도 즉시 동기화!
+        try {
+          const days = {};
+          for (const r of validRecords) {
+            if (!days[r.date]) days[r.date] = {};
+            days[r.date][r.activityId] = r.done === true;
+          }
+          const pendingSaved = JSON.parse(localStorage.getItem(APP_PENDING_KEY) || '[]');
+          if (Array.isArray(pendingSaved)) {
+            for (const p of pendingSaved) {
+              if (p && p.date && p.id && typeof p.done === 'boolean') {
+                if (!days[p.date]) days[p.date] = {};
+                days[p.date][p.id] = p.done;
+              }
+            }
+          }
+          localStorage.setItem(APP_DAYS_KEY, JSON.stringify({ days }));
+        } catch (_) {}
       }
 
       function loadLocalClientCache() {
+        let fromV4 = null;
+        let fromSnap = null;
         try {
           const raw = JSON.parse(localStorage.getItem(LOCAL_CLIENT_CACHE_KEY) || 'null');
           const norm = normalizeClient(raw);
-          if (norm && norm.records.length) return norm;
+          if (norm && norm.records.length) fromV4 = norm;
         } catch (_) {}
         try {
           const snap = JSON.parse(localStorage.getItem(APP_SNAPSHOT_KEY) || 'null');
@@ -554,10 +616,110 @@
               sync: { lastSuccess: snap.lastRecordSync || '' },
               updatedAt: snap.lastRecordSync || new Date().toISOString()
             });
-            if (norm && norm.records.length) return norm;
+            if (norm && norm.records.length) fromSnap = norm;
           }
         } catch (_) {}
-        return null;
+        if (fromV4 && fromSnap) return mergeClientSnapshots(fromSnap, fromV4);
+        return fromV4 || fromSnap || null;
+      }
+
+      // 스크립트 시작 즉시 로컬 캐시를 메모리에 예열하여 첫 화면 로딩 지연을 0ms로 단축
+      let cachedClient = loadLocalClientCache();
+      if (cachedClient) saveLocalClientCache(cachedClient);
+      let cachedMeta = loadLocalMetaCache();
+      let lastBackgroundSyncAt = 0;
+      let initialReadDone = false;
+
+      // 조회(fetchFbClient) 중에는 절대 Firebase에 쓰기(writeFb)를 수행하지 않으며,
+      // 기존 캐시와 항목별 버전을 비교·병합하여 오래된 스냅샷에 의해 체크가 풀리는 현상을 방지
+      async function fetchFbClient() {
+        try {
+          const r = await fetch(buildFbUrl('client'), { cache: 'no-store' });
+          if (r.status === 401 || r.status === 403) {
+            fbPermissionDenied = true;
+            return cachedClient;
+          }
+          if (!r.ok) return cachedClient;
+          const d = await r.json();
+          if (!d || typeof d !== 'object' || d.error) {
+            if (d && String(d.error).toLowerCase().includes('permission')) fbPermissionDenied = true;
+            return cachedClient;
+          }
+          fbPermissionDenied = false;
+          const norm = normalizeClient(d);
+          if (norm && norm.records.length) {
+            const merged = mergeClientSnapshots(cachedClient, norm);
+            cachedClient = merged;
+            saveLocalClientCache(merged);
+            return merged;
+          }
+          return cachedClient;
+        } catch (_) {
+          return cachedClient;
+        }
+      }
+
+      // 초기 부팅(allowBridgeFallback = false) 시에는 브리지 대기로 인해 첫 화면(read)이 지연되지 않도록 즉시 반환
+      async function fetchFbMeta(allowBridgeFallback = true) {
+        try {
+          const r = await fetch(buildFbUrl('meta'), { cache: 'no-store' });
+          if (r.ok) {
+            const d = await r.json();
+            if (d && typeof d === 'object' && !d.error) {
+              fbPermissionDenied = false;
+              cachedMeta = normalizeMeta(d);
+              saveLocalMetaCache(cachedMeta);
+              return cachedMeta;
+            }
+          } else if (r.status === 401 || r.status === 403) {
+            fbPermissionDenied = true;
+          }
+        } catch (_) {}
+
+        if (allowBridgeFallback) {
+          try {
+            const bridgeRes = await bridgeCall({ action: 'meta-read' });
+            if (bridgeRes && bridgeRes.ok && bridgeRes.meta) {
+              cachedMeta = normalizeMeta(bridgeRes.meta);
+              saveLocalMetaCache(cachedMeta);
+              return cachedMeta;
+            }
+          } catch (_) {}
+        }
+
+        cachedMeta = cachedMeta || loadLocalMetaCache() || normalizeMeta(null);
+        return cachedMeta;
+      }
+
+      // HTTP 상태 코드 검증 + Permission denied 시 브리지(meta-save)를 통해 서버 OAuth 권한으로 저장
+      // 주의: 브라우저가 임의로 조합한 /client 전체 배열 덮어쓰기(client 전체 PUT)는 데이터 유실 방지를 위해 금지!
+      async function writeFb(path, data) {
+        const cleanPath = String(path).replace(/^\/+/, '');
+        if (cleanPath === 'meta') {
+          saveLocalMetaCache(data);
+        }
+        try {
+          const res = await fetch(buildFbUrl(cleanPath), {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+          });
+          if (res.ok) {
+            const body = await res.json().catch(() => null);
+            if (!body || !body.error) return true;
+          }
+          if (res.status === 401 || res.status === 403) {
+            fbPermissionDenied = true;
+          }
+        } catch (_) {}
+
+        if (cleanPath === 'meta') {
+          const bRes = await bridgeCall({ action: 'meta-save', meta: data });
+          if (bRes && bRes.ok) return true;
+        }
+        const err = new Error('FIREBASE_WRITE_FAILED');
+        err.code = 'CONNECTION_FAILED';
+        throw err;
       }
 
       const prefetchShellPromise = fetch('./app.html')
@@ -565,7 +727,7 @@
         .catch(() => null);
 
       const prefetchClientPromise = fetchFbClient();
-      const prefetchMetaPromise = fetchFbMeta();
+      const prefetchMetaPromise = fetchFbMeta(false);
 
       let bridgeSource = null;
       let bridgeOrigin = null;
@@ -766,9 +928,21 @@
         const action = req && req.action;
 
         if (action === 'read' && initialReadDone) {
-          const [freshFb, freshMeta] = await Promise.all([fetchFbClient(), fetchFbMeta()]);
-          if (freshFb) cachedClient = freshFb;
-          if (freshMeta) cachedMeta = freshMeta;
+          const freshFb = await fetchFbClient();
+          if (freshFb) cachedClient = mergeClientSnapshots(cachedClient, freshFb);
+          if (fbPermissionDenied && Date.now() - lastManualSetAt > 3000) {
+            try {
+              const fastBridge = await bridgeCall({ action: 'read' });
+              if (fastBridge && fastBridge.ok && Array.isArray(fastBridge.records) && fastBridge.records.length) {
+                cachedClient = mergeClientSnapshots(cachedClient, normalizeClient(fastBridge));
+                saveLocalClientCache(cachedClient);
+                if (fastBridge.meta) {
+                  cachedMeta = normalizeMeta(fastBridge.meta);
+                  saveLocalMetaCache(cachedMeta);
+                }
+              }
+            } catch (_) {}
+          }
         }
 
         let client = cachedClient || (await prefetchClientPromise);
@@ -779,28 +953,30 @@
           if (localCached && localCached.records.length) {
             client = localCached;
             cachedClient = client;
-            // Firebase /lifequest/client가 비어 있을 때(GAS UrlFetch 할당량 소진 등) 브라우저가 즉시 Firebase에 복구 업로드
-            writeFb('client', client).catch(() => {});
           } else {
             try {
-              const getRes = await fetch(GAS_URL + '?action=read', { cache: 'no-store' }).then(r => (r.ok ? r.json() : null)).catch(() => null);
-              if (getRes && getRes.ok && Array.isArray(getRes.records) && getRes.records.length) {
-                client = normalizeClient(getRes);
+              const fastSheetData = await bridgeCall({ action: 'read' }).catch(() => null);
+              if (fastSheetData && fastSheetData.ok && Array.isArray(fastSheetData.records) && fastSheetData.records.length) {
+                client = normalizeClient(fastSheetData);
+                if (fastSheetData.meta) {
+                  meta = normalizeMeta(fastSheetData.meta);
+                  cachedMeta = meta;
+                  saveLocalMetaCache(meta);
+                }
               } else {
-                const fastSheetData = await bridgeCall({ action: 'read' }).catch(() => null);
-                if (fastSheetData && fastSheetData.ok && Array.isArray(fastSheetData.records) && fastSheetData.records.length) {
-                  client = normalizeClient(fastSheetData);
-                } else {
-                  const sheetData = await bridgeCall({ action: 'syncAndRead' });
-                  if (sheetData && sheetData.ok && Array.isArray(sheetData.records)) {
-                    client = normalizeClient(sheetData);
+                const sheetData = await bridgeCall({ action: 'syncAndRead' });
+                if (sheetData && sheetData.ok && Array.isArray(sheetData.records)) {
+                  client = normalizeClient(sheetData);
+                  if (sheetData.meta) {
+                    meta = normalizeMeta(sheetData.meta);
+                    cachedMeta = meta;
+                    saveLocalMetaCache(meta);
                   }
                 }
               }
               if (client && Array.isArray(client.records) && client.records.length) {
                 cachedClient = client;
                 saveLocalClientCache(client);
-                writeFb('client', client).catch(() => {});
               }
             } catch (_) {}
           }
@@ -810,23 +986,45 @@
           cachedClient = client;
         }
 
+        if (action === 'configure') {
+          const rawKey = String(req.key || '').trim();
+          if (!rawKey) return { ok: false, error: 'INVALID_KEY', timing: { totalMs: Date.now() - started } };
+          try { localStorage.setItem(LOCAL_FB_AUTH_KEY, rawKey); } catch (_) {}
+          await bridgeCall({ action: 'configure', key: rawKey }).catch(() => null);
+          fbPermissionDenied = false;
+          return { ok: true, timing: { totalMs: Date.now() - started } };
+        }
+
         if (action === 'read') {
+          const wasFirstRead = !initialReadDone;
           initialReadDone = true;
-          if (Date.now() - lastBackgroundSyncAt > 45000 && Date.now() - lastManualSetAt > 8000) {
-            lastBackgroundSyncAt = Date.now();
+          const nowMs = Date.now();
+          const lastSyncMs = Date.parse(client?.sync?.lastSuccess || '') || 0;
+          const slot1110Ms = Date.parse(today + 'T11:10:00+09:00');
+          const slot1200Ms = Date.parse(today + 'T12:00:00+09:00');
+          const crossed1110 = nowMs >= slot1110Ms && lastSyncMs < slot1110Ms;
+          const crossed1200 = nowMs >= slot1200Ms && lastSyncMs < slot1200Ms;
+          const hasOverdueSettlement = toArray(client.records).some(r =>
+            r && r.done && !r.deleted && r.settled === false && r.settlesAt && nowMs >= Date.parse(r.settlesAt)
+          );
+          const needFullAutoSync = !lastSyncMs || (nowMs - lastSyncMs > 10 * 60 * 1000) || crossed1110 || crossed1200 || hasOverdueSettlement;
+
+          if ((nowMs - lastBackgroundSyncAt > 30000 || hasOverdueSettlement || crossed1110 || crossed1200) && nowMs - lastManualSetAt > 8000) {
+            lastBackgroundSyncAt = nowMs;
             const beforeSig = clientRecordSignature(client);
-            const lastSyncMs = Date.parse(client?.sync?.lastSuccess || '') || 0;
-            const needFullAutoSync = !lastSyncMs || (Date.now() - lastSyncMs > 10 * 60 * 1000);
             setTimeout(() => {
               if (Date.now() - lastManualSetAt < 8000) return;
               bridgeCall({ action: needFullAutoSync ? 'syncAndRead' : 'read' })
                 .then(async fresh => {
                   if (!fresh || !fresh.ok || !Array.isArray(fresh.records)) return;
-                  const norm = normalizeClient(fresh);
-                  const afterSig = clientRecordSignature(norm);
-                  cachedClient = norm;
-                  saveLocalClientCache(norm);
-                  try { await writeFb('client', norm); } catch (_) {}
+                  if (fresh.meta) {
+                    cachedMeta = normalizeMeta(fresh.meta);
+                    saveLocalMetaCache(cachedMeta);
+                  }
+                  const merged = mergeClientSnapshots(cachedClient, normalizeClient(fresh));
+                  const afterSig = clientRecordSignature(merged);
+                  cachedClient = merged;
+                  saveLocalClientCache(merged);
                   if (afterSig !== beforeSig && Date.now() - lastManualSetAt > 8000) {
                     try {
                       appFrame.contentWindow.document.getElementById('refreshCloud')?.click();
@@ -834,7 +1032,7 @@
                   }
                 })
                 .catch(() => {});
-            }, 3500);
+            }, wasFirstRead ? 400 : 1200);
           }
           const career = await buildCareerForSeason(activeSeason.id, client.records, meta, false);
           return {
@@ -847,9 +1045,46 @@
           };
         }
 
+        // 실패한 하위 단계(Firebase engine 업로드 / Firebase client 업로드 / Tasks 반영)만 별도로 재시도하는 타이머
+        function scheduleStepRetry(delayMs = 5000) {
+          if (window.__lqStepRetryTimer) return;
+          window.__lqStepRetryCount = (window.__lqStepRetryCount || 0) + 1;
+          if (window.__lqStepRetryCount > 6) return;
+          window.__lqStepRetryTimer = setTimeout(async () => {
+            window.__lqStepRetryTimer = null;
+            try {
+              const retryRes = await bridgeCall({ action: 'retry-sync' });
+              if (!retryRes || !retryRes.ok) {
+                // BUSY 등 서버 잠금 경합이나 일시적 오류 응답 시에도 다음 재시도를 예약
+                scheduleStepRetry(Math.min(60000, 10000 * window.__lqStepRetryCount));
+                return;
+              }
+              if (Array.isArray(retryRes.records)) {
+                const merged = mergeClientSnapshots(cachedClient, normalizeClient(retryRes));
+                cachedClient = merged;
+                saveLocalClientCache(merged);
+                if (retryRes.anySyncPending) {
+                  // 상태 변화 없이(예: 삭제된 Task로 인해) 대기만 남은 경우 백오프 간격을 늘려 불필요한 호출 방지
+                  const nextDelay = retryRes.stateChanged ? 15000 : Math.min(60000, 20000 * window.__lqStepRetryCount);
+                  scheduleStepRetry(nextDelay);
+                } else {
+                  window.__lqStepRetryCount = 0;
+                  try {
+                    appFrame.contentWindow.document.getElementById('refreshCloud')?.click();
+                  } catch (_) {}
+                }
+              }
+            } catch (_) {
+              scheduleStepRetry(Math.min(60000, 15000 * window.__lqStepRetryCount));
+            }
+          }, delayMs);
+        }
+
         // 원자적 수동 체크/취소(action === 'set'):
-        // 1) 서버 브리지(lifeQuestBridgeRequest)를 먼저 호출해 expectedVersion 충돌 검증, 시트 기록 및 Tasks 반영 결과를 확인
-        // 2) 서버가 확정한 최신 레코드만 로컬 상태 및 Firebase에 반영하며, 실패 시 에러를 그대로 반환해 app.html SaveQueue가 재시도하도록 보장
+        // 1) 서버 브리지(lifeQuestBridgeRequest)를 먼저 호출해 expectedVersion 충돌 검증, 엔진 원본(engineSaved),
+        //    Firebase 엔진 업로드(engineUploaded), 다른 기기용 화면 데이터 업로드(clientUploaded), Tasks 반영(taskSyncPending)을 각각 확인
+        // 2) 엔진 원본 저장 자체가 실패(engineSaved === false)했으면 실패를 반환해 SaveQueue가 재시도하도록 하고,
+        //    엔진 원본은 저장됐으나 Firebase 업로드나 Tasks 반영이 밀렸다면 taskSyncPending: true로 표시 후 실패한 단계만 retry-sync로 재시도!
         if (action === 'set') {
           const date = String(req.date || today);
           const activityId = String(req.activityId || '');
@@ -874,22 +1109,36 @@
             };
           }
 
-          if (!res || !res.ok) {
+          if (!res || !res.ok || res.engineSaved === false) {
             if (res && res.record && client && Array.isArray(client.records)) {
               const cIdx = client.records.findIndex(r => r.date === res.record.date && r.activityId === res.record.activityId);
               if (cIdx >= 0) client.records[cIdx] = res.record;
               else client.records.push(res.record);
               cachedClient = normalizeClient(client);
+              saveLocalClientCache(cachedClient);
             }
             return {
               ok: false,
-              error: (res && res.error) || 'SYNC_ERROR',
+              error: (res && res.error) || 'UPSTREAM_UNAVAILABLE',
               record: res ? res.record : undefined,
               timing: { totalMs: Date.now() - started }
             };
           }
 
-          const confirmedRec = res.record;
+          const engineUploaded = res.engineUploaded !== false;
+          const clientUploaded = res.clientUploaded !== false;
+          const firebaseSyncPending = Boolean(!engineUploaded || !clientUploaded || res.firebaseSyncPending);
+          const taskSyncPending = Boolean(res.taskSyncPending);
+          const anySyncPending = Boolean(taskSyncPending || firebaseSyncPending);
+
+          const confirmedRec = Object.assign({}, res.record, {
+            engineSaved: true,
+            engineUploaded,
+            clientUploaded,
+            firebaseSyncPending,
+            taskSyncPending,
+            anySyncPending
+          });
           const idx = client.records.findIndex(r => r.date === date && r.activityId === activityId);
           if (idx >= 0) client.records[idx] = confirmedRec;
           else client.records.push(confirmedRec);
@@ -897,16 +1146,32 @@
           if (res.adventures && client.sync) {
             client.sync.adventure = res.adventures;
           }
+          if (client.sync) {
+            client.sync.engineSyncPending = !engineUploaded;
+            client.sync.clientSyncPending = !clientUploaded;
+            client.sync.firebaseSyncPending = firebaseSyncPending;
+            client.sync.taskPending = taskSyncPending ? Math.max(1, Number(client.sync.taskPending) || 0) : 0;
+            client.sync.pending = (taskSyncPending ? 1 : 0) + (!engineUploaded ? 1 : 0) + (!clientUploaded ? 1 : 0);
+          }
           cachedClient = normalizeClient(client);
           saveLocalClientCache(cachedClient);
 
-          try { await writeFb('client', cachedClient); } catch (_) {}
+          if (anySyncPending) {
+            window.__lqStepRetryCount = 0;
+            scheduleStepRetry(4000);
+          }
           void syncRecoveryHabitToGrowthDashboard(activityId, cachedClient.records);
 
           return {
             ok: true,
             record: confirmedRec,
-            taskSyncPending: Boolean(res.taskSyncPending),
+            engineSaved: true,
+            engineUploaded,
+            clientUploaded,
+            firebaseUploaded: Boolean(engineUploaded && clientUploaded),
+            firebaseSyncPending,
+            taskSyncPending,
+            anySyncPending,
             adventures: res.adventures || cachedClient.sync?.adventure || null,
             timing: { totalMs: Date.now() - started }
           };
