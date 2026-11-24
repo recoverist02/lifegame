@@ -1556,6 +1556,24 @@
         panel.showModal();
         const form = panel.querySelector('form');
         const [pin, keep] = form.querySelectorAll('input');
+        const status = form.querySelector('[role=status]');
+        status.textContent = 'Google 계정 연결 확인 중…';
+        bridgeCall({action:'pin-resume',sessionToken:''}).then(() => {
+          if (panel.isConnected) status.textContent = '로그인 서버 연결됨';
+        }).catch(error => {
+          if (status.textContent !== 'Google 계정 연결 확인 중…') return;
+          status.textContent = /LOGIN_REQUIRED/.test(error.message) ? '로그인 서버 연결됨' : describeFailure(error);
+        });
+        function describeFailure(error) {
+          const message = String(error.message || '');
+          if (/TRY_LATER/.test(message)) return '시도 횟수 제한에 도달했어. 15분 후 다시 시도해줘.';
+          if (/INVALID_PIN/.test(message)) return '4자리 PIN을 확인해줘.';
+          if (/PIN_NOT_CONFIGURED/.test(message)) return '서버에 4자리 PIN 설정이 필요해.';
+          if (/연결 대기 초과/.test(message)) return 'Google 연결 창이 응답하지 않았어. Google 계정 확인 후 앱을 다시 열어줘.';
+          if (/응답 시간 초과/.test(message)) return '연결됐지만 서버 응답이 지연되고 있어. 다시 시도해줘.';
+          if (/LOGIN_REQUIRED/.test(message)) return '서버에서 유효한 세션을 받지 못했어.';
+          return '서버 요청 실패: ' + message.slice(0,180);
+        }
         async function unlock(action) {
           const session = await authenticate(action);
           if (!session || typeof session.token !== 'string' || !(session.expiresAt > Date.now())) throw Error('LOGIN_REQUIRED');
@@ -1568,6 +1586,7 @@
         sessionToken = localStorage.getItem(storageKey) || sessionStorage.getItem(storageKey) || '';
         form.onsubmit = async event => {
           event.preventDefault();
+          status.textContent = 'PIN 확인 중…';
           form.querySelector('button').disabled = true;
           try {
             await unlock({action:'pin-login', pin:pin.value, keep:keep.checked});
@@ -1576,7 +1595,7 @@
             (keep.checked ? localStorage : sessionStorage).setItem(storageKey,sessionToken);
           } catch (error) {
             pin.value = '';
-            form.querySelector('[role=status]').textContent = /TRY_LATER/.test(error.message) ? '15분 뒤에 다시 시도해줘.' : /INVALID_PIN/.test(error.message) ? 'PIN을 다시 확인해줘.' : 'Google 계정 확인 후 새로고침해줘.';
+            status.textContent = describeFailure(error);
           } finally { form.querySelector('button').disabled = false; }
         };
         if (sessionToken) {
