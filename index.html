@@ -726,8 +726,8 @@
         .then(r => (r.ok ? r.text() : null))
         .catch(() => null);
 
-      const prefetchClientPromise = fetchFbClient();
-      const prefetchMetaPromise = fetchFbMeta(false);
+      let prefetchClientPromise;
+      let prefetchMetaPromise;
 
       let bridgeSource = null;
       let bridgeOrigin = null;
@@ -785,7 +785,7 @@
             reject(err);
           }, 25000);
           pending.set(id, { resolve, reject, timer });
-          bridgeSource.postMessage({ channel: CHANNEL, id, payload }, bridgeOrigin || '*');
+          bridgeSource.postMessage({ channel: CHANNEL, id, payload: {...payload, sessionToken} }, bridgeOrigin);
         });
       }
 
@@ -1519,6 +1519,8 @@
       }
 
       async function boot() {
+        prefetchClientPromise = fetchFbClient();
+        prefetchMetaPromise = fetchFbMeta(false);
         let text = await prefetchShellPromise;
         if (!text) {
           try {
@@ -1541,7 +1543,50 @@
         bootStatus.innerHTML = '깃허브 저장소에 <b>app.html</b> 파일을 함께 업로드해 주세요.';
       }
 
-      boot();
+      const authenticate = bridgeCall;
+      let sessionToken = '';
+      const storageKey = 'private-app-session-v1';
+      async function openPrivateApp() {
+        const panel = document.createElement('dialog');
+        panel.style.cssText = 'padding:24px;border:0;border-radius:16px;max-width:90vw;color:#122c30';
+        panel.innerHTML = '<form><strong>개인용 앱 로그인</strong><p><label>4자리 PIN <input type="password" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" required size="5"></label></p><label><input type="checkbox" checked> 7일 유지</label> <button>로그인</button><p role="status"></p><a target="_blank" rel="noopener">Google 계정 확인</a></form>';
+        panel.querySelector('a').href = GAS_URL;
+        document.body.appendChild(panel);
+        panel.addEventListener('cancel', event => event.preventDefault());
+        panel.showModal();
+        const form = panel.querySelector('form');
+        const [pin, keep] = form.querySelectorAll('input');
+        async function unlock(action) {
+          const session = await authenticate(action);
+          if (!session || typeof session.token !== 'string' || !(session.expiresAt > Date.now())) throw Error('LOGIN_REQUIRED');
+          sessionToken = session.token;
+          const remaining = session.expiresAt - Date.now();
+          setTimeout(() => location.reload(), remaining);
+          panel.remove();
+          await boot();
+        }
+        sessionToken = localStorage.getItem(storageKey) || sessionStorage.getItem(storageKey) || '';
+        form.onsubmit = async event => {
+          event.preventDefault();
+          form.querySelector('button').disabled = true;
+          try {
+            await unlock({action:'pin-login', pin:pin.value, keep:keep.checked});
+            localStorage.removeItem(storageKey);
+            sessionStorage.removeItem(storageKey);
+            (keep.checked ? localStorage : sessionStorage).setItem(storageKey,sessionToken);
+          } catch (error) {
+            pin.value = '';
+            form.querySelector('[role=status]').textContent = /TRY_LATER/.test(error.message) ? '15분 뒤에 다시 시도해줘.' : /INVALID_PIN/.test(error.message) ? 'PIN을 다시 확인해줘.' : 'Google 계정 확인 후 새로고침해줘.';
+          } finally { form.querySelector('button').disabled = false; }
+        };
+        if (sessionToken) {
+          form.querySelector('button').disabled = true;
+          try { await unlock({action:'pin-resume', sessionToken}); }
+          catch { sessionToken = ''; localStorage.removeItem(storageKey); sessionStorage.removeItem(storageKey); }
+          finally { form.querySelector('button').disabled = false; }
+        }
+      }
+      openPrivateApp();
     })();
   </script>
 </body>
