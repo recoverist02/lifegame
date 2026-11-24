@@ -678,9 +678,28 @@ index.html (복사용 전체 코드)
         return fbClientInFlight;
       }
 
-      // 동일 시점 다중 탭/위젯 요청(프로필 4종 등)을 단일 요청으로 합치고, 최근 조회한 캐시는 즉시 반환
+      // 동일 시점 다중 탭/위젯 요청(프로필 4종 등)을 단일 요청으로 합치고,
+      // 로컬 캐시(cachedMeta)가 있으면 즉시 반환한 뒤 백그라운드에서 최신화 (5초 대기 제거)
       async function fetchFbMeta(allowBridgeFallback = true, forceRefresh = false) {
-        if (!forceRefresh && cachedMeta && cachedMetaFetchedAt && (Date.now() - cachedMetaFetchedAt < META_CACHE_TTL_MS)) {
+        if (!forceRefresh && cachedMeta) {
+          const isFresh = cachedMetaFetchedAt && (Date.now() - cachedMetaFetchedAt < META_CACHE_TTL_MS);
+          if (isFresh) return cachedMeta;
+          if (allowBridgeFallback && !fbMetaInFlight) {
+            // 백그라운드로 조용히 최신 meta를 받아두고, 현재 화면은 0ms로 즉시 표시
+            fbMetaInFlight = (async () => {
+              try {
+                const bridgeRes = await bridgeCall({ action: 'meta-read' });
+                if (bridgeRes && bridgeRes.ok && bridgeRes.meta) {
+                  const nextMeta = normalizeMeta(bridgeRes.meta);
+                  cachedMeta = nextMeta;
+                  cachedMetaFetchedAt = Date.now();
+                  saveLocalMetaCache(nextMeta);
+                }
+              } catch (_) {}
+              finally { fbMetaInFlight = null; }
+              return cachedMeta;
+            })();
+          }
           return cachedMeta;
         }
         if (fbMetaInFlight) return fbMetaInFlight;
