@@ -76,10 +76,7 @@
     (() => {
       const FIREBASE_DB_URL = 'https://recoverist-hub-default-rtdb.asia-southeast1.firebasedatabase.app';
       const GAS_URL = 'https://script.google.com/macros/s/AKfycbzPA41nh-YQj0qTVRgGWM_X3mDsgxQyaaHv6J1I9MPotcV6dEe-YO3h0PRgiSIoM6vD/exec';
-      if (window.top === window && location.hostname === 'recoverist02.github.io') {
-        location.replace(GAS_URL + '?app=1');
-        return;
-      }
+      let sessionToken = '';
       const CHANNEL = 'lifequest-sheets-v1';
 
       const appFrame = document.getElementById('appFrame');
@@ -1551,14 +1548,11 @@
       }
 
       const authenticate = bridgeCall;
-      let sessionToken = '';
       const storageKey = 'private-app-session-v1';
       async function openPrivateApp() {
         const panel = document.createElement('dialog');
         panel.style.cssText = 'padding:24px;border:0;border-radius:16px;max-width:90vw;color:#122c30';
-        panel.innerHTML = '<form><strong>개인용 앱 로그인</strong><p><label>4자리 PIN <input type="password" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" required size="5"></label></p><label><input type="checkbox" checked> 7일 유지</label> <button>로그인</button><p role="status"></p><a target="_blank" rel="noopener">Google 계정 확인</a></form>';
-        panel.querySelector('a').href = GAS_URL + '?app=1';
-        panel.querySelector('a').textContent = 'Google에서 인생게임 열기';
+        panel.innerHTML = '<form><strong>개인용 앱 로그인</strong><p><label>4자리 PIN <input type="password" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" required size="5"></label></p><label><input type="checkbox" checked> 7일 유지</label> <button>로그인</button><p role="status"></p></form>';
         document.body.appendChild(panel);
         panel.addEventListener('cancel', event => event.preventDefault());
         panel.showModal();
@@ -1577,7 +1571,7 @@
           if (/TRY_LATER/.test(message)) return '시도 횟수 제한에 도달했어. 15분 후 다시 시도해줘.';
           if (/INVALID_PIN/.test(message)) return '4자리 PIN을 확인해줘.';
           if (/PIN_NOT_CONFIGURED/.test(message)) return '서버에 4자리 PIN 설정이 필요해.';
-          if (/연결 대기 초과/.test(message)) return 'Google 연결 창이 응답하지 않았어. Google 계정 확인 후 앱을 다시 열어줘.';
+          if (/연결 대기 초과/.test(message)) return '로그인 서버 브리지 연결에 실패했어. Apps Script 웹앱 배포 권한(모든 사용자)과 허용 도메인 설정을 확인해줘.';
           if (/응답 시간 초과/.test(message)) return '연결됐지만 서버 응답이 지연되고 있어. 다시 시도해줘.';
           if (/LOGIN_REQUIRED/.test(message)) return '서버에서 유효한 세션을 받지 못했어.';
           return '서버 요청 실패: ' + message.slice(0,180);
