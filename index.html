@@ -1569,6 +1569,7 @@
 
       const authenticate = bridgeCall;
       const storageKey = 'private-app-session-v1';
+      const storageExpKey = 'private-app-session-exp-v1';
       async function openPrivateApp() {
         function describeFailure(error) {
           const message = String(error && error.message ? error.message : '');
@@ -1580,86 +1581,146 @@
           if (/LOGIN_REQUIRED/.test(message)) return '서버에서 유효한 세션을 받지 못했어.';
           return '서버 요청 실패: ' + message.slice(0, 180);
         }
-        async function startSession(session, panel) {
-          if (!session || typeof session.token !== 'string' || !(session.expiresAt > Date.now())) throw Error('LOGIN_REQUIRED');
-          sessionToken = session.token;
-          if (session.snapshot && typeof session.snapshot === 'object') {
-            if (Array.isArray(session.snapshot.records) && session.snapshot.records.length) {
-              cachedClient = mergeClientSnapshots(cachedClient, normalizeClient(session.snapshot));
-              cachedClientFetchedAt = Date.now();
-              saveLocalClientCache(cachedClient);
-            }
-            if (session.snapshot.meta && typeof session.snapshot.meta === 'object') {
-              cachedMeta = normalizeMeta(session.snapshot.meta);
-              cachedMetaFetchedAt = Date.now();
-              saveLocalMetaCache(cachedMeta);
-            }
+        function saveStoredSession(token, expiresAt, keep) {
+          localStorage.removeItem(storageKey);
+          localStorage.removeItem(storageExpKey);
+          sessionStorage.removeItem(storageKey);
+          sessionStorage.removeItem(storageExpKey);
+          const store = keep ? localStorage : sessionStorage;
+          store.setItem(storageKey, token);
+          if (expiresAt) store.setItem(storageExpKey, String(expiresAt));
+        }
+        function clearStoredSession() {
+          sessionToken = '';
+          localStorage.removeItem(storageKey);
+          localStorage.removeItem(storageExpKey);
+          sessionStorage.removeItem(storageKey);
+          sessionStorage.removeItem(storageExpKey);
+        }
+        function applySessionSnapshot(session) {
+          if (!session || !session.snapshot || typeof session.snapshot !== 'object') return false;
+          const beforeSig = clientRecordSignature(cachedClient);
+          if (Array.isArray(session.snapshot.records) && session.snapshot.records.length) {
+            cachedClient = mergeClientSnapshots(cachedClient, normalizeClient(session.snapshot));
+            cachedClientFetchedAt = Date.now();
+            saveLocalClientCache(cachedClient);
           }
-          const remaining = session.expiresAt - Date.now();
+          if (session.snapshot.meta && typeof session.snapshot.meta === 'object') {
+            cachedMeta = normalizeMeta(session.snapshot.meta);
+            cachedMetaFetchedAt = Date.now();
+            saveLocalMetaCache(cachedMeta);
+          }
+          return clientRecordSignature(cachedClient) !== beforeSig;
+        }
+        function scheduleSessionExpiry(expiresAt) {
+          const remaining = Number(expiresAt || 0) - Date.now();
           if (remaining > 0 && remaining <= 2147483647) {
             setTimeout(() => location.reload(), remaining);
           }
-          if (panel) panel.remove();
-          await boot();
+        }
+        function showPinDialog(initialError) {
+          const panel = document.createElement('dialog');
+          panel.style.cssText = 'padding:24px;border:0;border-radius:16px;max-width:90vw;color:#122c30';
+          panel.innerHTML = '<form><strong>개인용 앱 로그인</strong><p><label>4자리 PIN <input type="password" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" required size="5"></label></p><label><input type="checkbox" checked> 7일 유지</label> <button>로그인</button><p role="status"></p></form>';
+          document.body.appendChild(panel);
+          panel.addEventListener('cancel', event => event.preventDefault());
+          panel.showModal();
+          const form = panel.querySelector('form');
+          const [pin, keep] = form.querySelectorAll('input');
+          const status = form.querySelector('[role=status]');
+          if (initialError) {
+            status.textContent = describeFailure(initialError);
+          } else {
+            status.textContent = '로그인 서버 연결 확인 중…';
+            bridgeCall({ action: 'pin-resume', sessionToken: '' }).then(() => {
+              if (panel.isConnected) status.textContent = '로그인 서버 연결됨';
+            }).catch(error => {
+              if (status.textContent !== '로그인 서버 연결 확인 중…') return;
+              status.textContent = /LOGIN_REQUIRED/.test(error.message) ? '로그인 서버 연결됨' : describeFailure(error);
+            });
+          }
+          form.onsubmit = async event => {
+            event.preventDefault();
+            status.textContent = 'PIN 확인 중…';
+            form.querySelector('button').disabled = true;
+            try {
+              const session = await authenticate({ action: 'pin-login', pin: pin.value, keep: keep.checked, includeSnapshot: true });
+              if (!session || typeof session.token !== 'string' || !(session.expiresAt > Date.now())) throw Error('LOGIN_REQUIRED');
+              sessionToken = session.token;
+              saveStoredSession(session.token, session.expiresAt, keep.checked);
+              applySessionSnapshot(session);
+              scheduleSessionExpiry(session.expiresAt);
+              panel.remove();
+              await boot();
+            } catch (error) {
+              pin.value = '';
+              status.textContent = describeFailure(error);
+            } finally { form.querySelector('button').disabled = false; }
+          };
         }
 
-        // 브라우저에 저장된 세션이 있으면 로그인 팝업 없이 즉시 자동 로그인 시도
-        let resumeError = null;
+        const fromLocal = Boolean(localStorage.getItem(storageKey));
         const savedToken = localStorage.getItem(storageKey) || sessionStorage.getItem(storageKey) || '';
-        if (savedToken) {
+        const savedExp = Number(localStorage.getItem(storageExpKey) || sessionStorage.getItem(storageExpKey) || 0);
+        const notExpired = !savedExp || savedExp > Date.now();
+
+        if (savedToken && notExpired) {
           sessionToken = savedToken;
+          // 이미 이 브라우저에 로그인 세션과 로컬 기록이 있으면 5초 대기 없이 즉시 화면부터 열고,
+          // 서버 세션 검증과 최신 데이터 동기화는 백그라운드에서 진행
+          if (cachedClient && Array.isArray(cachedClient.records) && cachedClient.records.length) {
+            if (savedExp) scheduleSessionExpiry(savedExp);
+            await boot();
+            authenticate({ action: 'pin-resume', sessionToken: savedToken, includeSnapshot: true })
+              .then(session => {
+                if (!session || typeof session.token !== 'string' || !(session.expiresAt > Date.now())) {
+                  throw Error('LOGIN_REQUIRED');
+                }
+                sessionToken = session.token;
+                saveStoredSession(session.token, session.expiresAt, fromLocal);
+                if (!savedExp) scheduleSessionExpiry(session.expiresAt);
+                const changed = applySessionSnapshot(session);
+                if (changed && Date.now() - lastManualSetAt > 5000) {
+                  try { appFrame.contentWindow.document.getElementById('refreshCloud')?.click(); } catch (_) {}
+                }
+              })
+              .catch(err => {
+                const errMsg = String(err && err.message ? err.message : '');
+                if (/LOGIN_REQUIRED|INVALID_PIN|PIN_NOT_CONFIGURED/.test(errMsg)) {
+                  clearStoredSession();
+                  appFrame.srcdoc = '';
+                  bootOverlay.classList.remove('hidden');
+                  showPinDialog(null);
+                }
+              });
+            return;
+          }
+
+          // 로컬 캐시가 아직 없는 첫 기기/캐시 초기화 상태에서는 서버 스냅샷 수신 후 화면 열기
           bootStatus.textContent = '저장된 로그인 세션을 확인하는 중…';
           try {
             const session = await authenticate({ action: 'pin-resume', sessionToken: savedToken, includeSnapshot: true });
-            await startSession(session, null);
+            if (!session || typeof session.token !== 'string' || !(session.expiresAt > Date.now())) throw Error('LOGIN_REQUIRED');
+            sessionToken = session.token;
+            saveStoredSession(session.token, session.expiresAt, fromLocal);
+            applySessionSnapshot(session);
+            scheduleSessionExpiry(session.expiresAt);
+            await boot();
             return;
           } catch (err) {
-            resumeError = err;
             const errMsg = String(err && err.message ? err.message : '');
             if (/LOGIN_REQUIRED|INVALID_PIN|PIN_NOT_CONFIGURED/.test(errMsg)) {
-              sessionToken = '';
-              localStorage.removeItem(storageKey);
-              sessionStorage.removeItem(storageKey);
-              resumeError = null;
+              clearStoredSession();
+              showPinDialog(null);
+            } else {
+              showPinDialog(err);
             }
+            return;
           }
         }
 
-        const panel = document.createElement('dialog');
-        panel.style.cssText = 'padding:24px;border:0;border-radius:16px;max-width:90vw;color:#122c30';
-        panel.innerHTML = '<form><strong>개인용 앱 로그인</strong><p><label>4자리 PIN <input type="password" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" required size="5"></label></p><label><input type="checkbox" checked> 7일 유지</label> <button>로그인</button><p role="status"></p></form>';
-        document.body.appendChild(panel);
-        panel.addEventListener('cancel', event => event.preventDefault());
-        panel.showModal();
-        const form = panel.querySelector('form');
-        const [pin, keep] = form.querySelectorAll('input');
-        const status = form.querySelector('[role=status]');
-        if (resumeError) {
-          status.textContent = describeFailure(resumeError);
-        } else {
-          status.textContent = '로그인 서버 연결 확인 중…';
-          bridgeCall({ action: 'pin-resume', sessionToken: '' }).then(() => {
-            if (panel.isConnected) status.textContent = '로그인 서버 연결됨';
-          }).catch(error => {
-            if (status.textContent !== '로그인 서버 연결 확인 중…') return;
-            status.textContent = /LOGIN_REQUIRED/.test(error.message) ? '로그인 서버 연결됨' : describeFailure(error);
-          });
-        }
-        form.onsubmit = async event => {
-          event.preventDefault();
-          status.textContent = 'PIN 확인 중…';
-          form.querySelector('button').disabled = true;
-          try {
-            const session = await authenticate({ action: 'pin-login', pin: pin.value, keep: keep.checked, includeSnapshot: true });
-            localStorage.removeItem(storageKey);
-            sessionStorage.removeItem(storageKey);
-            (keep.checked ? localStorage : sessionStorage).setItem(storageKey, session.token);
-            await startSession(session, panel);
-          } catch (error) {
-            pin.value = '';
-            status.textContent = describeFailure(error);
-          } finally { form.querySelector('button').disabled = false; }
-        };
+        if (savedToken && !notExpired) clearStoredSession();
+        showPinDialog(null);
       }
       openPrivateApp();
     })();
