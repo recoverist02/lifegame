@@ -760,10 +760,13 @@
       bridgeFrame.setAttribute('aria-hidden', 'true');
       bridgeFrame.tabIndex = -1;
       bridgeFrame.style.cssText = 'position:fixed;left:-9999px;width:1px;height:1px;border:0;opacity:0';
-      bridgeFrame.src = GAS_URL + '?bridge=1';
-      document.body.appendChild(bridgeFrame);
+      if (!window.google?.script?.run) bridgeFrame.src = GAS_URL + '?bridge=1';
+      if (!window.google?.script?.run) document.body.appendChild(bridgeFrame);
 
       async function bridgeCall(payload) {
+        if (window.google?.script?.run) {
+          return new Promise((resolve,reject) => google.script.run.withSuccessHandler(resolve).withFailureHandler(reject).lifeQuestBridgeRequest({...payload,sessionToken}));
+        }
         let waitTimer;
         await Promise.race([
           bridgeReady,
@@ -1506,11 +1509,11 @@
           .replace("navigator.serviceWorker.register('/sw.js'", "Promise.resolve('/sw.js'")
           .replace(/location\.reload\(\)/g, 'window.top.location.reload()')
           .replace(/history\.replaceState\([^)]*\)/g, 'void 0')
-          .replaceAll('adventurer-fullbody-v1.webp', new URL('adventurer-fullbody-v1.webp', window.location.href).href)
-          .replaceAll('profile-adventurer.webp', new URL('profile-adventurer.webp', window.location.href).href)
-          .replaceAll('woodland-backdrop-v1.webp', new URL('woodland-backdrop-v1.webp', window.location.href).href)
-          .replaceAll('journal-banner.webp', new URL('journal-banner.webp', window.location.href).href)
-          .replaceAll('inventory-banner.webp', new URL('inventory-banner.webp', window.location.href).href);
+          .replaceAll('adventurer-fullbody-v1.webp', new URL('adventurer-fullbody-v1.webp', document.baseURI).href)
+          .replaceAll('profile-adventurer.webp', new URL('profile-adventurer.webp', document.baseURI).href)
+          .replaceAll('woodland-backdrop-v1.webp', new URL('woodland-backdrop-v1.webp', document.baseURI).href)
+          .replaceAll('journal-banner.webp', new URL('journal-banner.webp', document.baseURI).href)
+          .replaceAll('inventory-banner.webp', new URL('inventory-banner.webp', document.baseURI).href);
 
         if (/<head[^>]*>/i.test(cleaned)) {
           return cleaned.replace(/<head[^>]*>/i, (m) => m + shim);
@@ -1550,7 +1553,8 @@
         const panel = document.createElement('dialog');
         panel.style.cssText = 'padding:24px;border:0;border-radius:16px;max-width:90vw;color:#122c30';
         panel.innerHTML = '<form><strong>개인용 앱 로그인</strong><p><label>4자리 PIN <input type="password" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" required size="5"></label></p><label><input type="checkbox" checked> 7일 유지</label> <button>로그인</button><p role="status"></p><a target="_blank" rel="noopener">Google 계정 확인</a></form>';
-        panel.querySelector('a').href = GAS_URL;
+        panel.querySelector('a').href = GAS_URL + '?app=1';
+        panel.querySelector('a').textContent = 'Google에서 인생게임 열기';
         document.body.appendChild(panel);
         panel.addEventListener('cancel', event => event.preventDefault());
         panel.showModal();
