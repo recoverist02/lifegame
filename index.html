@@ -822,28 +822,6 @@
         });
       }
 
-      async function syncRecoveryHabitToGrowthDashboard(activityId, records) {
-        if (!['sobriety', 'gambling-free', 'moderation'].includes(activityId)) return;
-        try {
-          const res = await fetch(`${cleanFbUrl}/growth/data.json`, { cache: 'no-store' });
-          if (!res.ok) return;
-          const growthData = await res.json();
-          if (!growthData || !Array.isArray(growthData.habitData)) return;
-          const habit = growthData.habitData.find(h => h && h.id === activityId);
-          if (!habit) return;
-          const doneDates = [...new Set(records.filter(r => r.activityId === activityId && r.done && !r.deleted).map(r => r.date))].sort();
-          habit.dates = doneDates;
-          if (doneDates.length && (!habit.startDate || doneDates[0] < habit.startDate)) {
-            habit.startDate = doneDates[0];
-          }
-          await fetch(`${cleanFbUrl}/growth/data.json`, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(growthData)
-          });
-        } catch (_) {}
-      }
-
       // 주간 전직 이력(careersBySeason) 보존 및 회차별 직업 산출
       const JOB_CATALOG = {
         vitality: [
@@ -1204,7 +1182,6 @@
             window.__lqStepRetryCount = 0;
             scheduleStepRetry(4000);
           }
-          void syncRecoveryHabitToGrowthDashboard(activityId, cachedClient.records);
 
           return {
             ok: true,
