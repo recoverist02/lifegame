@@ -628,68 +628,97 @@
       let cachedClient = loadLocalClientCache();
       if (cachedClient) saveLocalClientCache(cachedClient);
       let cachedMeta = loadLocalMetaCache();
+      let cachedMetaFetchedAt = 0;
+      let cachedClientFetchedAt = 0;
+      let fbClientInFlight = null;
+      let fbMetaInFlight = null;
+      let careerPersistInFlight = false;
+      const META_CACHE_TTL_MS = 60000;
       let lastBackgroundSyncAt = 0;
       let initialReadDone = false;
 
       // 조회(fetchFbClient) 중에는 절대 Firebase에 쓰기(writeFb)를 수행하지 않으며,
       // 기존 캐시와 항목별 버전을 비교·병합하여 오래된 스냅샷에 의해 체크가 풀리는 현상을 방지
       async function fetchFbClient() {
-        try {
-          const r = await fetch(buildFbUrl('client'), { cache: 'no-store' });
-          if (r.status === 401 || r.status === 403) {
-            fbPermissionDenied = true;
+        if (fbPermissionDenied) return cachedClient;
+        if (fbClientInFlight) return fbClientInFlight;
+        fbClientInFlight = (async () => {
+          try {
+            const r = await fetch(buildFbUrl('client'), { cache: 'no-store' });
+            if (r.status === 401 || r.status === 403) {
+              fbPermissionDenied = true;
+              return cachedClient;
+            }
+            if (!r.ok) return cachedClient;
+            const d = await r.json();
+            if (!d || typeof d !== 'object' || d.error) {
+              if (d && String(d.error).toLowerCase().includes('permission')) fbPermissionDenied = true;
+              return cachedClient;
+            }
+            fbPermissionDenied = false;
+            const norm = normalizeClient(d);
+            if (norm && norm.records.length) {
+              const merged = mergeClientSnapshots(cachedClient, norm);
+              cachedClient = merged;
+              cachedClientFetchedAt = Date.now();
+              saveLocalClientCache(merged);
+              return merged;
+            }
             return cachedClient;
-          }
-          if (!r.ok) return cachedClient;
-          const d = await r.json();
-          if (!d || typeof d !== 'object' || d.error) {
-            if (d && String(d.error).toLowerCase().includes('permission')) fbPermissionDenied = true;
+          } catch (_) {
             return cachedClient;
+          } finally {
+            fbClientInFlight = null;
           }
-          fbPermissionDenied = false;
-          const norm = normalizeClient(d);
-          if (norm && norm.records.length) {
-            const merged = mergeClientSnapshots(cachedClient, norm);
-            cachedClient = merged;
-            saveLocalClientCache(merged);
-            return merged;
-          }
-          return cachedClient;
-        } catch (_) {
-          return cachedClient;
-        }
+        })();
+        return fbClientInFlight;
       }
 
-      // 초기 부팅(allowBridgeFallback = false) 시에는 브리지 대기로 인해 첫 화면(read)이 지연되지 않도록 즉시 반환
-      async function fetchFbMeta(allowBridgeFallback = true) {
-        try {
-          const r = await fetch(buildFbUrl('meta'), { cache: 'no-store' });
-          if (r.ok) {
-            const d = await r.json();
-            if (d && typeof d === 'object' && !d.error) {
-              fbPermissionDenied = false;
-              cachedMeta = normalizeMeta(d);
-              saveLocalMetaCache(cachedMeta);
-              return cachedMeta;
-            }
-          } else if (r.status === 401 || r.status === 403) {
-            fbPermissionDenied = true;
-          }
-        } catch (_) {}
-
-        if (allowBridgeFallback) {
-          try {
-            const bridgeRes = await bridgeCall({ action: 'meta-read' });
-            if (bridgeRes && bridgeRes.ok && bridgeRes.meta) {
-              cachedMeta = normalizeMeta(bridgeRes.meta);
-              saveLocalMetaCache(cachedMeta);
-              return cachedMeta;
-            }
-          } catch (_) {}
+      // 동일 시점 다중 탭/위젯 요청(프로필 4종 등)을 단일 요청으로 합치고, 최근 조회한 캐시는 즉시 반환
+      async function fetchFbMeta(allowBridgeFallback = true, forceRefresh = false) {
+        if (!forceRefresh && cachedMeta && cachedMetaFetchedAt && (Date.now() - cachedMetaFetchedAt < META_CACHE_TTL_MS)) {
+          return cachedMeta;
         }
+        if (fbMetaInFlight) return fbMetaInFlight;
+        fbMetaInFlight = (async () => {
+          try {
+            if (!fbPermissionDenied) {
+              try {
+                const r = await fetch(buildFbUrl('meta'), { cache: 'no-store' });
+                if (r.ok) {
+                  const d = await r.json();
+                  if (d && typeof d === 'object' && !d.error) {
+                    fbPermissionDenied = false;
+                    cachedMeta = normalizeMeta(d);
+                    cachedMetaFetchedAt = Date.now();
+                    saveLocalMetaCache(cachedMeta);
+                    return cachedMeta;
+                  }
+                } else if (r.status === 401 || r.status === 403) {
+                  fbPermissionDenied = true;
+                }
+              } catch (_) {}
+            }
 
-        cachedMeta = cachedMeta || loadLocalMetaCache() || normalizeMeta(null);
-        return cachedMeta;
+            if (allowBridgeFallback) {
+              try {
+                const bridgeRes = await bridgeCall({ action: 'meta-read' });
+                if (bridgeRes && bridgeRes.ok && bridgeRes.meta) {
+                  cachedMeta = normalizeMeta(bridgeRes.meta);
+                  cachedMetaFetchedAt = Date.now();
+                  saveLocalMetaCache(cachedMeta);
+                  return cachedMeta;
+                }
+              } catch (_) {}
+            }
+
+            cachedMeta = cachedMeta || loadLocalMetaCache() || normalizeMeta(null);
+            return cachedMeta;
+          } finally {
+            fbMetaInFlight = null;
+          }
+        })();
+        return fbMetaInFlight;
       }
 
       // HTTP 상태 코드 검증 + Permission denied 시 브리지(meta-save)를 통해 서버 OAuth 권한으로 저장
@@ -896,10 +925,13 @@
           dirty = true;
         }
 
-        if (dirty && persistIfChanged) {
+        if (dirty && persistIfChanged && !careerPersistInFlight) {
           meta.careersBySeason[seasonId] = { history, updatedAt: new Date().toISOString() };
           cachedMeta = meta;
-          try { await writeFb('meta', meta); } catch (_) {}
+          cachedMetaFetchedAt = Date.now();
+          saveLocalMetaCache(meta);
+          careerPersistInFlight = true;
+          writeFb('meta', meta).catch(() => {}).finally(() => { careerPersistInFlight = false; });
         }
 
         const current = history[history.length - 1] || null;
@@ -932,20 +964,25 @@
         const action = req && req.action;
 
         if (action === 'read' && initialReadDone) {
-          const freshFb = await fetchFbClient();
-          if (freshFb) cachedClient = mergeClientSnapshots(cachedClient, freshFb);
-          if (fbPermissionDenied && Date.now() - lastManualSetAt > 3000) {
-            try {
-              const fastBridge = await bridgeCall({ action: 'read' });
-              if (fastBridge && fastBridge.ok && Array.isArray(fastBridge.records) && fastBridge.records.length) {
-                cachedClient = mergeClientSnapshots(cachedClient, normalizeClient(fastBridge));
-                saveLocalClientCache(cachedClient);
-                if (fastBridge.meta) {
-                  cachedMeta = normalizeMeta(fastBridge.meta);
-                  saveLocalMetaCache(cachedMeta);
+          const recentlySynced = cachedClientFetchedAt && (Date.now() - cachedClientFetchedAt < 10000);
+          if (!recentlySynced) {
+            const freshFb = await fetchFbClient();
+            if (freshFb) cachedClient = mergeClientSnapshots(cachedClient, freshFb);
+            if (fbPermissionDenied && Date.now() - lastManualSetAt > 3000) {
+              try {
+                const fastBridge = await bridgeCall({ action: 'read' });
+                if (fastBridge && fastBridge.ok && Array.isArray(fastBridge.records) && fastBridge.records.length) {
+                  cachedClient = mergeClientSnapshots(cachedClient, normalizeClient(fastBridge));
+                  cachedClientFetchedAt = Date.now();
+                  saveLocalClientCache(cachedClient);
+                  if (fastBridge.meta) {
+                    cachedMeta = normalizeMeta(fastBridge.meta);
+                    cachedMetaFetchedAt = Date.now();
+                    saveLocalMetaCache(cachedMeta);
+                  }
                 }
-              }
-            } catch (_) {}
+              } catch (_) {}
+            }
           }
         }
 
@@ -1011,9 +1048,10 @@
           const hasOverdueSettlement = toArray(client.records).some(r =>
             r && r.done && !r.deleted && r.settled === false && r.settlesAt && nowMs >= Date.parse(r.settlesAt)
           );
-          const needFullAutoSync = !lastSyncMs || (nowMs - lastSyncMs > 10 * 60 * 1000) || crossed1110 || crossed1200 || hasOverdueSettlement;
+          const needFullAutoSync = !lastSyncMs || crossed1110 || crossed1200 || hasOverdueSettlement;
+          const justHydratedFromLogin = cachedClientFetchedAt && (nowMs - cachedClientFetchedAt < 15000);
 
-          if ((nowMs - lastBackgroundSyncAt > 30000 || hasOverdueSettlement || crossed1110 || crossed1200) && nowMs - lastManualSetAt > 8000) {
+          if (((!justHydratedFromLogin && nowMs - lastBackgroundSyncAt > 60000) || hasOverdueSettlement || crossed1110 || crossed1200) && nowMs - lastManualSetAt > 8000) {
             lastBackgroundSyncAt = nowMs;
             const beforeSig = clientRecordSignature(client);
             setTimeout(() => {
@@ -1023,11 +1061,13 @@
                   if (!fresh || !fresh.ok || !Array.isArray(fresh.records)) return;
                   if (fresh.meta) {
                     cachedMeta = normalizeMeta(fresh.meta);
+                    cachedMetaFetchedAt = Date.now();
                     saveLocalMetaCache(cachedMeta);
                   }
                   const merged = mergeClientSnapshots(cachedClient, normalizeClient(fresh));
                   const afterSig = clientRecordSignature(merged);
                   cachedClient = merged;
+                  cachedClientFetchedAt = Date.now();
                   saveLocalClientCache(merged);
                   if (afterSig !== beforeSig && Date.now() - lastManualSetAt > 8000) {
                     try {
@@ -1036,7 +1076,7 @@
                   }
                 })
                 .catch(() => {});
-            }, wasFirstRead ? 400 : 1200);
+            }, wasFirstRead ? 3000 : 1500);
           }
           const career = await buildCareerForSeason(activeSeason.id, client.records, meta, false);
           return {
@@ -1193,7 +1233,7 @@
           if (sId !== activeSeason.id) {
             return { ok: false, error: 'SEASON_READ_ONLY', timing: { totalMs: Date.now() - started } };
           }
-          meta = await fetchFbMeta();
+          meta = await fetchFbMeta(true, true);
           const currentAlloc = meta.statsBySeason?.[sId] || { values: { ...ZERO_STATS }, revision: 0 };
           if (!Number.isInteger(req.expectedRevision) || req.expectedRevision !== (currentAlloc.revision || 0)) {
             return { ok: false, error: 'STAT_CONFLICT', timing: { totalMs: Date.now() - started } };
@@ -1266,7 +1306,7 @@
           if (sId !== activeSeason.id) {
             return { ok: false, error: 'SEASON_READ_ONLY', timing: { totalMs: Date.now() - started } };
           }
-          meta = await fetchFbMeta();
+          meta = await fetchFbMeta(true, true);
           const sObj = allSeasonsUpToToday().find(s => s.id === sId) || activeSeason;
           const skillEntry = meta.skillsBySeason?.[sId] || { state: { schema: 1, learned: [], legends: [], ultimate: null, spentPoints: 0 }, revision: 0 };
 
@@ -1346,7 +1386,7 @@
         }
 
         if (action === 'reward-claim') {
-          meta = await fetchFbMeta();
+          meta = await fetchFbMeta(true, true);
           const sId = req.season || activeSeason.id;
           const rewardId = `${sId}:${req.questId}:${req.stage}`;
           let reward = (meta.rewards || []).find(r => r.reward_id === rewardId);
@@ -1523,8 +1563,9 @@
       }
 
       async function boot() {
-        prefetchClientPromise = fetchFbClient();
-        prefetchMetaPromise = fetchFbMeta(false);
+        const hasFreshSnapshot = Boolean(cachedClient && cachedClientFetchedAt && cachedMeta && cachedMetaFetchedAt);
+        prefetchClientPromise = hasFreshSnapshot ? Promise.resolve(cachedClient) : fetchFbClient();
+        prefetchMetaPromise = hasFreshSnapshot ? Promise.resolve(cachedMeta) : fetchFbMeta(false);
         let text = await prefetchShellPromise;
         if (!text) {
           try {
@@ -1535,10 +1576,12 @@
         if (text && text.includes('LIFE QUEST')) {
           const warm = loadLocalClientCache();
           if (warm) saveLocalClientCache(warm);
-          await Promise.race([
-            Promise.all([prefetchClientPromise, prefetchMetaPromise]),
-            new Promise(r => setTimeout(r, 200))
-          ]);
+          if (!hasFreshSnapshot) {
+            await Promise.race([
+              Promise.all([prefetchClientPromise, prefetchMetaPromise]),
+              new Promise(r => setTimeout(r, 200))
+            ]);
+          }
           appFrame.onload = () => bootOverlay.classList.add('hidden');
           appFrame.srcdoc = injectBridgeIntoAppHtml(text);
           setTimeout(() => bootOverlay.classList.add('hidden'), 150);
@@ -1563,6 +1606,18 @@
         async function startSession(session, panel) {
           if (!session || typeof session.token !== 'string' || !(session.expiresAt > Date.now())) throw Error('LOGIN_REQUIRED');
           sessionToken = session.token;
+          if (session.snapshot && typeof session.snapshot === 'object') {
+            if (Array.isArray(session.snapshot.records) && session.snapshot.records.length) {
+              cachedClient = mergeClientSnapshots(cachedClient, normalizeClient(session.snapshot));
+              cachedClientFetchedAt = Date.now();
+              saveLocalClientCache(cachedClient);
+            }
+            if (session.snapshot.meta && typeof session.snapshot.meta === 'object') {
+              cachedMeta = normalizeMeta(session.snapshot.meta);
+              cachedMetaFetchedAt = Date.now();
+              saveLocalMetaCache(cachedMeta);
+            }
+          }
           const remaining = session.expiresAt - Date.now();
           if (remaining > 0 && remaining <= 2147483647) {
             setTimeout(() => location.reload(), remaining);
@@ -1578,7 +1633,7 @@
           sessionToken = savedToken;
           bootStatus.textContent = '저장된 로그인 세션을 확인하는 중…';
           try {
-            const session = await authenticate({ action: 'pin-resume', sessionToken: savedToken });
+            const session = await authenticate({ action: 'pin-resume', sessionToken: savedToken, includeSnapshot: true });
             await startSession(session, null);
             return;
           } catch (err) {
@@ -1618,7 +1673,7 @@
           status.textContent = 'PIN 확인 중…';
           form.querySelector('button').disabled = true;
           try {
-            const session = await authenticate({ action: 'pin-login', pin: pin.value, keep: keep.checked });
+            const session = await authenticate({ action: 'pin-login', pin: pin.value, keep: keep.checked, includeSnapshot: true });
             localStorage.removeItem(storageKey);
             sessionStorage.removeItem(storageKey);
             (keep.checked ? localStorage : sessionStorage).setItem(storageKey, session.token);
