@@ -766,7 +766,7 @@
 
       async function bridgeCall(payload) {
         if (window.google?.script?.run) {
-          return new Promise((resolve,reject) => google.script.run.withSuccessHandler(resolve).withFailureHandler(reject).lifeQuestBridgeRequest({...payload,sessionToken}));
+          return new Promise((resolve,reject) => google.script.run.withSuccessHandler(resolve).withFailureHandler(reject).lifeQuestBridgeRequest({sessionToken,...payload}));
         }
         let waitTimer;
         await Promise.race([
@@ -789,7 +789,7 @@
             reject(err);
           }, 25000);
           pending.set(id, { resolve, reject, timer });
-          bridgeSource.postMessage({ channel: CHANNEL, id, payload: {...payload, sessionToken} }, bridgeOrigin);
+          bridgeSource.postMessage({ channel: CHANNEL, id, payload: {sessionToken, ...payload} }, bridgeOrigin);
         });
       }
 
@@ -1550,6 +1550,49 @@
       const authenticate = bridgeCall;
       const storageKey = 'private-app-session-v1';
       async function openPrivateApp() {
+        function describeFailure(error) {
+          const message = String(error && error.message ? error.message : '');
+          if (/TRY_LATER/.test(message)) return '시도 횟수 제한에 도달했어. 15분 후 다시 시도해줘.';
+          if (/INVALID_PIN/.test(message)) return '4자리 PIN을 확인해줘.';
+          if (/PIN_NOT_CONFIGURED/.test(message)) return '서버에 4자리 PIN 설정이 필요해.';
+          if (/연결 대기 초과/.test(message)) return '로그인 서버 브리지 연결에 실패했어. Apps Script 웹앱 배포 액세스 권한이 "모든 사용자"인지 확인해줘.';
+          if (/응답 시간 초과/.test(message)) return '연결됐지만 서버 응답이 지연되고 있어. 다시 시도해줘.';
+          if (/LOGIN_REQUIRED/.test(message)) return '서버에서 유효한 세션을 받지 못했어.';
+          return '서버 요청 실패: ' + message.slice(0, 180);
+        }
+        async function startSession(session, panel) {
+          if (!session || typeof session.token !== 'string' || !(session.expiresAt > Date.now())) throw Error('LOGIN_REQUIRED');
+          sessionToken = session.token;
+          const remaining = session.expiresAt - Date.now();
+          if (remaining > 0 && remaining <= 2147483647) {
+            setTimeout(() => location.reload(), remaining);
+          }
+          if (panel) panel.remove();
+          await boot();
+        }
+
+        // 브라우저에 저장된 세션이 있으면 로그인 팝업 없이 즉시 자동 로그인 시도
+        let resumeError = null;
+        const savedToken = localStorage.getItem(storageKey) || sessionStorage.getItem(storageKey) || '';
+        if (savedToken) {
+          sessionToken = savedToken;
+          bootStatus.textContent = '저장된 로그인 세션을 확인하는 중…';
+          try {
+            const session = await authenticate({ action: 'pin-resume', sessionToken: savedToken });
+            await startSession(session, null);
+            return;
+          } catch (err) {
+            resumeError = err;
+            const errMsg = String(err && err.message ? err.message : '');
+            if (/LOGIN_REQUIRED|INVALID_PIN|PIN_NOT_CONFIGURED/.test(errMsg)) {
+              sessionToken = '';
+              localStorage.removeItem(storageKey);
+              sessionStorage.removeItem(storageKey);
+              resumeError = null;
+            }
+          }
+        }
+
         const panel = document.createElement('dialog');
         panel.style.cssText = 'padding:24px;border:0;border-radius:16px;max-width:90vw;color:#122c30';
         panel.innerHTML = '<form><strong>개인용 앱 로그인</strong><p><label>4자리 PIN <input type="password" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" required size="5"></label></p><label><input type="checkbox" checked> 7일 유지</label> <button>로그인</button><p role="status"></p></form>';
@@ -1559,53 +1602,32 @@
         const form = panel.querySelector('form');
         const [pin, keep] = form.querySelectorAll('input');
         const status = form.querySelector('[role=status]');
-        status.textContent = 'Google 계정 연결 확인 중…';
-        bridgeCall({action:'pin-resume',sessionToken:''}).then(() => {
-          if (panel.isConnected) status.textContent = '로그인 서버 연결됨';
-        }).catch(error => {
-          if (status.textContent !== 'Google 계정 연결 확인 중…') return;
-          status.textContent = /LOGIN_REQUIRED/.test(error.message) ? '로그인 서버 연결됨' : describeFailure(error);
-        });
-        function describeFailure(error) {
-          const message = String(error.message || '');
-          if (/TRY_LATER/.test(message)) return '시도 횟수 제한에 도달했어. 15분 후 다시 시도해줘.';
-          if (/INVALID_PIN/.test(message)) return '4자리 PIN을 확인해줘.';
-          if (/PIN_NOT_CONFIGURED/.test(message)) return '서버에 4자리 PIN 설정이 필요해.';
-          if (/연결 대기 초과/.test(message)) return '로그인 서버 브리지 연결에 실패했어. Apps Script 웹앱 배포 권한(모든 사용자)과 허용 도메인 설정을 확인해줘.';
-          if (/응답 시간 초과/.test(message)) return '연결됐지만 서버 응답이 지연되고 있어. 다시 시도해줘.';
-          if (/LOGIN_REQUIRED/.test(message)) return '서버에서 유효한 세션을 받지 못했어.';
-          return '서버 요청 실패: ' + message.slice(0,180);
+        if (resumeError) {
+          status.textContent = describeFailure(resumeError);
+        } else {
+          status.textContent = '로그인 서버 연결 확인 중…';
+          bridgeCall({ action: 'pin-resume', sessionToken: '' }).then(() => {
+            if (panel.isConnected) status.textContent = '로그인 서버 연결됨';
+          }).catch(error => {
+            if (status.textContent !== '로그인 서버 연결 확인 중…') return;
+            status.textContent = /LOGIN_REQUIRED/.test(error.message) ? '로그인 서버 연결됨' : describeFailure(error);
+          });
         }
-        async function unlock(action) {
-          const session = await authenticate(action);
-          if (!session || typeof session.token !== 'string' || !(session.expiresAt > Date.now())) throw Error('LOGIN_REQUIRED');
-          sessionToken = session.token;
-          const remaining = session.expiresAt - Date.now();
-          setTimeout(() => location.reload(), remaining);
-          panel.remove();
-          await boot();
-        }
-        sessionToken = localStorage.getItem(storageKey) || sessionStorage.getItem(storageKey) || '';
         form.onsubmit = async event => {
           event.preventDefault();
           status.textContent = 'PIN 확인 중…';
           form.querySelector('button').disabled = true;
           try {
-            await unlock({action:'pin-login', pin:pin.value, keep:keep.checked});
+            const session = await authenticate({ action: 'pin-login', pin: pin.value, keep: keep.checked });
             localStorage.removeItem(storageKey);
             sessionStorage.removeItem(storageKey);
-            (keep.checked ? localStorage : sessionStorage).setItem(storageKey,sessionToken);
+            (keep.checked ? localStorage : sessionStorage).setItem(storageKey, session.token);
+            await startSession(session, panel);
           } catch (error) {
             pin.value = '';
             status.textContent = describeFailure(error);
           } finally { form.querySelector('button').disabled = false; }
         };
-        if (sessionToken) {
-          form.querySelector('button').disabled = true;
-          try { await unlock({action:'pin-resume', sessionToken}); }
-          catch { sessionToken = ''; localStorage.removeItem(storageKey); sessionStorage.removeItem(storageKey); }
-          finally { form.querySelector('button').disabled = false; }
-        }
       }
       openPrivateApp();
     })();
