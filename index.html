@@ -1506,11 +1506,11 @@
           .replace("navigator.serviceWorker.register('/sw.js'", "Promise.resolve('/sw.js'")
           .replace(/location\.reload\(\)/g, 'window.top.location.reload()')
           .replace(/history\.replaceState\([^)]*\)/g, 'void 0')
-          .replaceAll('adventurer-fullbody-v1.webp', ADVENTURER_SVG)
-          .replaceAll('profile-adventurer.webp', ADVENTURER_SVG)
-          .replaceAll('woodland-backdrop-v1.webp', BANNER_SVG)
-          .replaceAll('journal-banner.webp', BANNER_SVG)
-          .replaceAll('inventory-banner.webp', BANNER_SVG);
+          .replaceAll('adventurer-fullbody-v1.webp', new URL('adventurer-fullbody-v1.webp', window.location.href).href)
+          .replaceAll('profile-adventurer.webp', new URL('profile-adventurer.webp', window.location.href).href)
+          .replaceAll('woodland-backdrop-v1.webp', new URL('woodland-backdrop-v1.webp', window.location.href).href)
+          .replaceAll('journal-banner.webp', new URL('journal-banner.webp', window.location.href).href)
+          .replaceAll('inventory-banner.webp', new URL('inventory-banner.webp', window.location.href).href);
 
         if (/<head[^>]*>/i.test(cleaned)) {
           return cleaned.replace(/<head[^>]*>/i, (m) => m + shim);
