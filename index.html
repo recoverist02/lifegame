@@ -76,6 +76,10 @@
     (() => {
       const FIREBASE_DB_URL = 'https://recoverist-hub-default-rtdb.asia-southeast1.firebasedatabase.app';
       const GAS_URL = 'https://script.google.com/macros/s/AKfycbzPA41nh-YQj0qTVRgGWM_X3mDsgxQyaaHv6J1I9MPotcV6dEe-YO3h0PRgiSIoM6vD/exec';
+      if (window.top === window && location.hostname === 'recoverist02.github.io') {
+        location.replace(GAS_URL + '?app=1');
+        return;
+      }
       const CHANNEL = 'lifequest-sheets-v1';
 
       const appFrame = document.getElementById('appFrame');
